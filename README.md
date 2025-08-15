@@ -12,13 +12,13 @@ A variant-aware shipping rate calculator that splits cart items by pre-order sta
 5. Deploy!
 
 ### Environment Variables Required
-SHOPIFY_API_KEY=your_api_key
-SHOPIFY_API_SECRET=your_api_secret
-SHOPIFY_WEBHOOK_SECRET=your_webhook_secret
-SHOPIFY_ACCESS_TOKEN=your_access_token
-SHOPIFY_SHOP_DOMAIN=your-shop.myshopify.com
-APP_DOMAIN=https://your-deployed-app.com
-REDIS_URL=redis://your-redis-url
+- SHOPIFY_API_KEY=your_api_key
+- SHOPIFY_API_SECRET=your_api_secret
+- SHOPIFY_WEBHOOK_SECRET=your_webhook_secret
+- SHOPIFY_ACCESS_TOKEN=your_access_token
+- SHOPIFY_SHOP_DOMAIN=your-shop.myshopify.com
+- APP_DOMAIN=https://your-deployed-app.com
+- REDIS_URL=redis://your-redis-url
 
 ## Features
 - ✅ Split shipping by variant pre-order status
