@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ship Ship Hooray - Admin</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f8f9fa;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        
+        input, textarea {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        .danger {
+            background: #dc3545;
+        }
+        
+        .danger:hover {
+            background: #c82333;
+        }
+        
+        .success {
+            background: #28a745;
+        }
+        
+        .success:hover {
+            background: #218838;
+        }
+        
+        .kill-switch {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .slider {
+            background-color: #dc3545;
+        }
+        
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚢 Ship Ship Hooray!</h1>
+            <p>Manage your variant-aware shipping rates</p>
+        </div>
+        
+        <div class="card">
+            <h2>Configuration</h2>
+            <form id="config-form">
+                <div class="grid">
+                    <div class="form-group">
+                        <label for="threshold">Free Shipping Threshold ($)</label>
+                        <input type="number" id="threshold" name="threshold" step="0.01" min="0">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="fee">Shipping Fee ($)</label>
+                        <input type="number" id="fee" name="fee" step="0.01" min="0">
+                    </div>
+                </div>
+                
+                <div class="grid">
+                    <div class="form-group">
+                        <label for="rts-label">Ready-to-Ship Label</label>
+                        <input type="text" id="rts-label" name="rts-label">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="po-label">Pre-Order Label</label>
+                        <input type="text" id="po-label" name="po-label">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <input type="text" id="description" name="description">
+                </div>
+                
+                <button type="submit">Save Configuration</button>
+            </form>
+        </div>
+        
+        <div class="card">
+            <h2>Kill Switch</h2>
+            <p>Turn on during promotions to disable custom shipping rates and use Shopify's native profiles.</p>
+            
+            <div class="kill-switch">
+                <label class="switch">
+                    <input type="checkbox" id="kill-switch">
+                    <span class="slider"></span>
+                </label>
+                <span id="kill-switch-status">OFF - Custom rates active</span>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Cache Management</h2>
+            <p>Manage variant metafield cache for better performance.</p>
+            
+            <div style="display: flex; gap: 10px; margin-top: 15px;">
+                <button id="cache-stats" class="success">View Cache Stats</button>
+                <button id="clear-cache" class="danger">Clear Cache</button>
+            </div>
+            
+            <div id="cache-info" style="margin-top: 15px;"></div>
+        </div>
+        
+        <div class="card">
+            <h2>Health Check</h2>
+            <button id="health-check" class="success">Check App Status</button>
+            <div id="health-status" style="margin-top: 15px;"></div>
+        </div>
+        
+        <div id="status-message"></div>
+    </div>
+
+    <script>
+        // Load configuration on page load
+        async function loadConfig() {
+            try {
+                const response = await fetch('/config');
+                const config = await response.json();
+                
+                document.getElementById('threshold').value = config.threshold / 100;
+                document.getElementById('fee').value = config.feeUnderThreshold / 100;
+                document.getElementById('rts-label').value = config.labels.rts;
+                document.getElementById('po-label').value = config.labels.po;
+                document.getElementById('description').value = config.description;
+                document.getElementById('kill-switch').checked = config.killSwitch;
+                
+                updateKillSwitchStatus(config.killSwitch);
+            } catch (error) {
+                showStatus('Error loading configuration: ' + error.message, 'error');
+            }
+        }
+        
+        // Save configuration
+        document.getElementById('config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = new FormData(e.target);
+            const config = {
+                threshold: Math.round(parseFloat(formData.get('threshold')) * 100),
+                feeUnderThreshold: Math.round(parseFloat(formData.get('fee')) * 100),
+                labels: {
+                    rts: formData.get('rts-label'),
+                    po: formData.get('po-label')
+                },
+                description: formData.get('description')
+            };
+            
+            try {
+                const response = await fetch('/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(config)
+                });
+                
+                if (response.ok) {
+                    showStatus('Configuration saved successfully!', 'success');
+                } else {
+                    throw new Error('Failed to save configuration');
+                }
+            } catch (error) {
+                showStatus('Error saving configuration: ' + error.message, 'error');
+            }
+        });
+        
+        // Kill switch handler
+        document.getElementById('kill-switch').addEventListener('change', async (e) => {
+            const killSwitch = e.target.checked;
+            
+            try {
+                const response = await fetch('/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ killSwitch })
+                });
+                
+                if (response.ok) {
+                    updateKillSwitchStatus(killSwitch);
+                    showStatus(`Kill switch ${killSwitch ? 'enabled' : 'disabled'}!`, 'success');
+                } else {
+                    throw new Error('Failed to update kill switch');
+                }
+            } catch (error) {
+                showStatus('Error updating kill switch: ' + error.message, 'error');
+                e.target.checked = !killSwitch;
+            }
+        });
+        
+        function updateKillSwitchStatus(isOn) {
+            const status = document.getElementById('kill-switch-status');
+            if (isOn) {
+                status.textContent = 'ON - Native Shopify rates active';
+                status.style.color = '#dc3545';
+            } else {
+                status.textContent = 'OFF - Custom rates active';
+                status.style.color = '#28a745';
+            }
+        }
+        
+        // Cache management
+        document.getElementById('cache-stats').addEventListener('click', async () => {
+            try {
+                const response = await fetch('/cache/stats');
+                const stats = await response.json();
+                
+                document.getElementById('cache-info').innerHTML = `
+                    <div class="status success">
+                        <strong>Cache Stats:</strong><br>
+                        Redis Connected: ${stats.redis_connected ? 'Yes' : 'No'}<br>
+                        Cached Variants: ${stats.cached_variants}<br>
+                        Cache Prefix: ${stats.cache_prefix}
+                    </div>
+                `;
+                console.log('Redis Memory Info:', stats.memory_info);
+            } catch (error) {
+                showStatus('Error fetching cache stats: ' + error.message, 'error');
+            }
+        });
+        
+        document.getElementById('clear-cache').addEventListener('click', async () => {
+            if (!confirm('Are you sure you want to clear the cache? This will force fresh lookups for all variant metafields.')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/cache/clear', { method: 'POST' });
+                const result = await response.json();
+                
+                document.getElementById('cache-info').innerHTML = `
+                    <div class="status success">
+                        Cache cleared! Removed ${result.cleared} cached entries.
+                    </div>
+                `;
+            } catch (error) {
+                showStatus('Error clearing cache: ' + error.message, 'error');
+            }
+        });
+        
+        // Health check
+        document.getElementById('health-check').addEventListener('click', async () => {
+            try {
+                const response = await fetch('/health');
+                const health = await response.json();
+                
+                document.getElementById('health-status').innerHTML = `
+                    <div class="status success">
+                        <strong>App Status:</strong> ${health.status}<br>
+                        <strong>Redis:</strong> ${health.redis}<br>
+                        <strong>Last Check:</strong> ${new Date(health.timestamp).toLocaleString()}
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('health-status').innerHTML = `
+                    <div class="status error">
+                        <strong>App Status:</strong> Error<br>
+                        <strong>Error:</strong> ${error.message}
+                    </div>
+                `;
+            }
+        });
+        
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status-message');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+            
+            setTimeout(() => {
+                statusDiv.innerHTML = '';
+            }, 5000);
+        }
+        
+        // Load configuration on page load
+        loadConfig();
+    </script>
+</body>
+</html>
