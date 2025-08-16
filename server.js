@@ -76,9 +76,9 @@ function verifyWebhook(data, hmacHeader) {
   );
 }
 
-async function getCachedVariantMetafield(variantId) {
+async function getCachedVariantPreOrder(variantId) {
   try {
-    const cacheKey = `variant_po_${variantId}`;
+    const cacheKey = `preproduct_variant_${variantId}`;
     const cached = await redis.get(cacheKey);
     
     if (cached !== null) {
@@ -91,96 +91,105 @@ async function getCachedVariantMetafield(variantId) {
   return null;
 }
 
-async function setCachedVariantMetafield(variantId, isPreOrder) {
+async function setCachedVariantPreOrder(variantId, isPreOrder) {
   try {
-    const cacheKey = `variant_po_${variantId}`;
+    const cacheKey = `preproduct_variant_${variantId}`;
     await redis.setEx(cacheKey, CACHE_TTL, JSON.stringify(isPreOrder));
   } catch (error) {
     console.warn('Cache write error:', error);
   }
 }
 
-async function fetchVariantMetafields(variantIds) {
-  const query = `
-    query VariantMetafields($ids: [ID!]!) {
-      nodes(ids: $ids) {
-        ... on ProductVariant {
-          id
-          metafield(namespace: "preproduct", key: "is_preorder") {
-            value
-            type
-          }
-        }
+// Get product ID from variant ID using Shopify API
+async function getProductIdFromVariant(variantId) {
+  try {
+    const response = await fetch(`https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-07/variants/${variantId}.json`, {
+      headers: {
+        'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
       }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch variant: ${response.status}`);
     }
-  `;
-  
-  const gqlVariantIds = variantIds.map(id => `gid://shopify/ProductVariant/${id}`);
-  
-  const response = await fetch(`https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-07/graphql.json`, {
-    method: 'POST',
-    headers: {
-      'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      query,
-      variables: { ids: gqlVariantIds }
-    })
-  });
-  
-  if (!response.ok) {
-    throw new Error(`GraphQL request failed: ${response.status} ${await response.text()}`);
+    
+    const data = await response.json();
+    return data.variant.product_id;
+  } catch (error) {
+    console.error('Error fetching product ID for variant:', variantId, error);
+    return null;
   }
-  
-  const data = await response.json();
-  return data;
+}
+
+// Call PreProduct API to check if variant is pre-order
+async function fetchPreProductStatus(productId, variantId) {
+  try {
+    const url = `https://api.preproduct.io/api/v2/on_preorder/${productId}?any_variant=false&variant_ids=${variantId}`;
+    
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${process.env.PREPRODUCT_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`PreProduct API failed: ${response.status} ${await response.text()}`);
+    }
+    
+    const data = await response.json();
+    
+    // PreProduct API returns object with variant IDs as keys
+    // and boolean values indicating pre-order status
+    return data[variantId] || false;
+    
+  } catch (error) {
+    console.error('Error calling PreProduct API:', error);
+    return false; // Default to not pre-order on error
+  }
 }
 
 async function getVariantPreOrderStatus(variantIds) {
   const results = new Map();
-  const uncachedIds = [];
+  const uncachedVariants = [];
   
   // Check cache first
   for (const variantId of variantIds) {
-    const cached = await getCachedVariantMetafield(variantId);
+    const cached = await getCachedVariantPreOrder(variantId);
     if (cached !== null) {
       results.set(variantId, cached);
     } else {
-      uncachedIds.push(variantId);
+      uncachedVariants.push(variantId);
     }
   }
   
-  // Fetch uncached variants in batch
-  if (uncachedIds.length > 0) {
+  // For uncached variants, we need to:
+  // 1. Get product ID from Shopify
+  // 2. Call PreProduct API
+  // 3. Cache the result
+  for (const variantId of uncachedVariants) {
     try {
-      const gqlData = await fetchVariantMetafields(uncachedIds);
+      // Get product ID for this variant
+      const productId = await getProductIdFromVariant(variantId);
       
-      if (gqlData.data && gqlData.data.nodes) {
-        for (const node of gqlData.data.nodes) {
-          if (node) {
-            const variantId = node.id.replace('gid://shopify/ProductVariant/', '');
-            const isPreOrder = node.metafield ? node.metafield.value === 'true' : false;
-            
-            results.set(variantId, isPreOrder);
-            await setCachedVariantMetafield(variantId, isPreOrder);
-          }
-        }
-      }
-      
-      // Set false for any remaining uncached variants
-      for (const variantId of uncachedIds) {
-        if (!results.has(variantId)) {
-          results.set(variantId, false);
-          await setCachedVariantMetafield(variantId, false);
-        }
+      if (productId) {
+        // Call PreProduct API
+        const isPreOrder = await fetchPreProductStatus(productId, variantId);
+        
+        // Store result and cache it
+        results.set(variantId, isPreOrder);
+        await setCachedVariantPreOrder(variantId, isPreOrder);
+        
+        console.log(`PreProduct API: Variant ${variantId} (Product ${productId}) is ${isPreOrder ? 'pre-order' : 'ready-to-ship'}`);
+      } else {
+        // Fallback: assume not pre-order if we can't get product ID
+        results.set(variantId, false);
+        await setCachedVariantPreOrder(variantId, false);
       }
     } catch (error) {
-      console.error('Error fetching variant metafields:', error);
-      // Fallback: assume not pre-order
-      for (const variantId of uncachedIds) {
-        results.set(variantId, false);
-      }
+      console.error('Error processing variant:', variantId, error);
+      // Fallback: assume not pre-order on error
+      results.set(variantId, false);
     }
   }
   
@@ -199,7 +208,8 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    redis: redis.isReady ? 'connected' : 'disconnected'
+    redis: redis.isReady ? 'connected' : 'disconnected',
+    preproduct_api: process.env.PREPRODUCT_API_TOKEN ? 'configured' : 'missing'
   });
 });
 
@@ -312,7 +322,7 @@ app.post('/rates', async (req, res) => {
     // Get variant IDs
     const variantIds = rate.items.map(item => item.variant_id.toString());
     
-    // Fetch pre-order status for all variants
+    // Fetch pre-order status for all variants from PreProduct
     const variantStatuses = await getVariantPreOrderStatus(variantIds);
     
     // Calculate subtotals
@@ -359,6 +369,7 @@ app.post('/rates', async (req, res) => {
     
     const processingTime = Date.now() - startTime;
     console.log(`Rates calculated in ${processingTime}ms for ${rate.items.length} items`);
+    console.log(`RTS subtotal: $${rtsSubtotal/100}, PO subtotal: $${preorderSubtotal/100}`);
     
     res.json({ rates });
     
@@ -386,7 +397,7 @@ app.post('/webhook/product-update', express.raw({ type: 'application/json' }), a
     // Invalidate cache for all variants of this product
     if (product.variants) {
       for (const variant of product.variants) {
-        const cacheKey = `variant_po_${variant.id}`;
+        const cacheKey = `preproduct_variant_${variant.id}`;
         try {
           await redis.del(cacheKey);
         } catch (error) {
@@ -429,13 +440,14 @@ app.get('/cache/stats', async (req, res) => {
     }
     
     const info = await redis.info('memory');
-    const keys = await redis.keys('variant_po_*');
+    const keys = await redis.keys('preproduct_variant_*');
     
     res.json({
       redis_connected: redis.isReady,
       cached_variants: keys.length,
-      cache_prefix: 'variant_po_',
-      memory_info: info
+      cache_prefix: 'preproduct_variant_',
+      memory_info: info,
+      preproduct_api: process.env.PREPRODUCT_API_TOKEN ? 'configured' : 'missing'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -449,13 +461,34 @@ app.post('/cache/clear', async (req, res) => {
       return res.status(503).json({ error: 'Redis not connected' });
     }
     
-    const keys = await redis.keys('variant_po_*');
+    const keys = await redis.keys('preproduct_variant_*');
     if (keys.length > 0) {
       await redis.del(keys);
     }
     res.json({ cleared: keys.length });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Test PreProduct API endpoint (for debugging)
+app.get('/test-preproduct/:productId/:variantId', async (req, res) => {
+  try {
+    const { productId, variantId } = req.params;
+    const isPreOrder = await fetchPreProductStatus(productId, variantId);
+    
+    res.json({
+      productId,
+      variantId,
+      isPreOrder,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message,
+      productId: req.params.productId,
+      variantId: req.params.variantId
+    });
   }
 });
 
@@ -494,6 +527,7 @@ app.listen(port, () => {
   console.log(`Ship Ship Hooray running on port ${port}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`App domain: ${process.env.APP_DOMAIN}`);
+  console.log(`PreProduct API: ${process.env.PREPRODUCT_API_TOKEN ? 'Configured' : 'Missing'}`);
 });
 
 export default app;
