@@ -42,7 +42,7 @@ app.use(express.urlencoded({ extended: true }));
 // Basic Auth middleware for admin interface
 function requireAuth(req, res, next) {
   // Skip auth for API endpoints that Shopify needs to access
-  const publicPaths = ['/rates', '/webhook/', '/health', '/install'];
+  const publicPaths = ['/rates', '/webhook/', '/health', '/install', '/auth'];
   const isPublicPath = publicPaths.some(path => req.path.startsWith(path));
   
   if (isPublicPath) {
@@ -234,6 +234,194 @@ async function getVariantPreOrderStatus(variantIds) {
 
 // Routes
 
+// OAuth initiation route (optional - for manual installs)
+app.get('/auth', (req, res) => {
+  const { shop } = req.query;
+  
+  if (!shop) {
+    return res.status(400).send('Missing shop parameter');
+  }
+  
+  const scopes = 'read_products,write_shipping,write_products';
+  const redirectUri = `${process.env.APP_DOMAIN}/auth/callback`;
+  const state = crypto.randomBytes(16).toString('hex');
+  
+  const authUrl = `https://${shop}/admin/oauth/authorize?` +
+    `client_id=${process.env.SHOPIFY_API_KEY}&` +
+    `scope=${scopes}&` +
+    `redirect_uri=${redirectUri}&` +
+    `state=${state}`;
+  
+  res.redirect(authUrl);
+});
+
+// OAuth callback route - handles Shopify's response after authorization
+app.get('/auth/callback', async (req, res) => {
+  try {
+    const { code, hmac, shop, state } = req.query;
+    
+    if (!code || !shop) {
+      return res.status(400).send('Missing required parameters');
+    }
+    
+    // Verify HMAC (security check)
+    const queryString = Object.keys(req.query)
+      .filter(key => key !== 'hmac')
+      .map(key => `${key}=${req.query[key]}`)
+      .sort()
+      .join('&');
+    
+    const calculatedHmac = crypto
+      .createHmac('sha256', process.env.SHOPIFY_API_SECRET)
+      .update(queryString)
+      .digest('hex');
+    
+    if (calculatedHmac !== hmac) {
+      return res.status(401).send('Invalid HMAC');
+    }
+    
+    // Exchange authorization code for access token
+    const tokenResponse = await fetch(`https://${shop}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        client_id: process.env.SHOPIFY_API_KEY,
+        client_secret: process.env.SHOPIFY_API_SECRET,
+        code: code
+      })
+    });
+    
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      throw new Error(`Token exchange failed: ${tokenResponse.status} ${errorText}`);
+    }
+    
+    const tokenData = await tokenResponse.json();
+    const accessToken = tokenData.access_token;
+    
+    console.log(`✅ OAuth successful for shop: ${shop}`);
+    console.log(`🔑 Access token received: ${accessToken.substring(0, 10)}...`);
+    
+    // Now install the carrier service and webhooks
+    try {
+      // Register carrier service
+      const carrierServiceResponse = await fetch(`https://${shop}/admin/api/2024-07/carrier_services.json`, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          carrier_service: {
+            name: "Ship Ship Hooray",
+            callback_url: `${process.env.APP_DOMAIN}/rates`,
+            service_discovery: true,
+            format: "json"
+          }
+        })
+      });
+      
+      if (!carrierServiceResponse.ok) {
+        const errorText = await carrierServiceResponse.text();
+        console.error('Carrier service registration failed:', errorText);
+      } else {
+        console.log('✅ Carrier service registered successfully');
+      }
+      
+      // Set up product update webhook
+      const webhookResponse = await fetch(`https://${shop}/admin/api/2024-07/webhooks.json`, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          webhook: {
+            topic: 'products/update',
+            address: `${process.env.APP_DOMAIN}/webhook/product-update`,
+            format: 'json'
+          }
+        })
+      });
+      
+      if (webhookResponse.ok) {
+        console.log('✅ Webhook registered successfully');
+      }
+      
+    } catch (installError) {
+      console.error('Post-installation setup error:', installError);
+    }
+    
+    // Show success page with access token
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Ship Ship Hooray - Installation Complete!</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                 padding: 40px; background: #f8f9fa; }
+          .container { max-width: 600px; margin: 0 auto; background: white; 
+                      padding: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+          h1 { color: #2c5aa0; margin-bottom: 20px; }
+          .success { background: #d4edda; color: #155724; padding: 15px; 
+                    border-radius: 4px; margin: 20px 0; }
+          .token-box { background: #f8f9fa; padding: 15px; border-radius: 4px; 
+                      font-family: monospace; word-break: break-all; margin: 20px 0; }
+          .next-steps { background: #e7f3ff; padding: 20px; border-radius: 4px; }
+          a { color: #2c5aa0; text-decoration: none; }
+          a:hover { text-decoration: underline; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>🚢 Ship Ship Hooray Installation Complete!</h1>
+          
+          <div class="success">
+            ✅ Successfully installed on <strong>${shop}</strong><br>
+            ✅ Carrier service "Ship Ship Hooray" registered<br>
+            ✅ Product update webhook configured<br>
+            ✅ Ready to calculate shipping rates!
+          </div>
+          
+          <h3>🔑 Access Token</h3>
+          <p>Add this access token to your Railway environment variables:</p>
+          <div class="token-box">
+            SHOPIFY_ACCESS_TOKEN=${accessToken}
+          </div>
+          
+          <div class="next-steps">
+            <h3>📋 Next Steps:</h3>
+            <ol>
+              <li><strong>Add the access token</strong> to your Railway environment variables</li>
+              <li><strong>Test the app:</strong> <a href="${process.env.APP_DOMAIN}" target="_blank">Visit Admin Interface</a></li>
+              <li><strong>Test shipping rates:</strong> Add items to cart and go to checkout</li>
+              <li><strong>Configure settings:</strong> Adjust thresholds and labels in admin</li>
+            </ol>
+          </div>
+          
+          <p style="margin-top: 30px; text-align: center;">
+            <a href="https://admin.shopify.com/store/${shop.replace('.myshopify.com', '')}" target="_blank">
+              ← Back to Shopify Admin
+            </a>
+          </p>
+        </div>
+      </body>
+      </html>
+    `);
+    
+  } catch (error) {
+    console.error('OAuth callback error:', error);
+    res.status(500).send(`
+      <h1>Installation Error</h1>
+      <p>Something went wrong during installation: ${error.message}</p>
+      <p><a href="javascript:history.back()">← Go Back</a></p>
+    `);
+  }
+});
+
 // Serve admin interface
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -249,7 +437,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Install/setup route
+// Install/setup route (legacy - OAuth callback handles this now)
 app.post('/install', async (req, res) => {
   try {
     const { shop, accessToken } = req.body;
