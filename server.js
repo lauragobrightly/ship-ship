@@ -39,6 +39,42 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Basic Auth middleware for admin interface
+function requireAuth(req, res, next) {
+  // Skip auth for API endpoints that Shopify needs to access
+  const publicPaths = ['/rates', '/webhook/', '/health', '/install'];
+  const isPublicPath = publicPaths.some(path => req.path.startsWith(path));
+  
+  if (isPublicPath) {
+    return next();
+  }
+  
+  const auth = req.headers.authorization;
+  
+  if (!auth || !auth.startsWith('Basic ')) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Ship Ship Hooray Admin"');
+    return res.status(401).send('Authentication required');
+  }
+  
+  const credentials = Buffer.from(auth.slice(6), 'base64').toString().split(':');
+  const username = credentials[0];
+  const password = credentials[1];
+  
+  // Simple username/password check
+  const adminUsername = process.env.ADMIN_USERNAME || 'admin';
+  const adminPassword = process.env.ADMIN_PASSWORD || 'ship_ship_hooray_123';
+  
+  if (username === adminUsername && password === adminPassword) {
+    next();
+  } else {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Ship Ship Hooray Admin"');
+    res.status(401).send('Invalid credentials');
+  }
+}
+
+// Apply auth to all routes except public API endpoints
+app.use(requireAuth);
+
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
