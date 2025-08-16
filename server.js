@@ -179,11 +179,14 @@ async function fetchPreProductStatus(productId, variantId) {
       throw new Error(`PreProduct API failed: ${response.status} ${await response.text()}`);
     }
     
-    const data = await response.json();
-    
-    // PreProduct API returns object with variant IDs as keys
-    // and boolean values indicating pre-order status
-    return data.on_preorder || false;
+const data = await response.json();
+
+// Debug logging
+console.log('PreProduct API raw response:', JSON.stringify(data));
+console.log('data.on_preorder value:', data.on_preorder);
+
+// PreProduct API returns {on_preorder: true/false}
+return data.on_preorder || false;
     
   } catch (error) {
     console.error('Error calling PreProduct API:', error);
