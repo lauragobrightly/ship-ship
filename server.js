@@ -177,7 +177,7 @@ async function fetchPreProductStatus(productId, variantId) {
     
     // PreProduct API returns object with variant IDs as keys
     // and boolean values indicating pre-order status
-    return data[variantId] || false;
+    return data.on_preorder || false;
     
   } catch (error) {
     console.error('Error calling PreProduct API:', error);
