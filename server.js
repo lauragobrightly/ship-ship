@@ -170,7 +170,7 @@ async function fetchPreProductStatus(productId, variantId) {
     
     const response = await fetch(url, {
       headers: {
-        'Authorization': `Bearer ${process.env.PREPRODUCT_API_TOKEN}`,
+        'Authorization': process.env.PREPRODUCT_API_TOKEN,
         'Content-Type': 'application/json'
       }
     });
