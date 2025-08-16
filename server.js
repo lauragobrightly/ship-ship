@@ -33,7 +33,13 @@ try {
 }
 
 // Middleware
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+    },
+  },
+}));
 app.use(compression());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
