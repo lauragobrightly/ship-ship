@@ -380,16 +380,23 @@
         document.getElementById('health-check').addEventListener('click', async () => {
             try {
                 const response = await fetch('/health');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
                 const health = await response.json();
                 
                 document.getElementById('health-status').innerHTML = `
                     <div class="status success">
                         <strong>App Status:</strong> ${health.status}<br>
                         <strong>Redis:</strong> ${health.redis}<br>
+                        <strong>PreProduct API:</strong> ${health.preproduct_api}<br>
                         <strong>Last Check:</strong> ${new Date(health.timestamp).toLocaleString()}
                     </div>
                 `;
             } catch (error) {
+                console.error('Health check error:', error);
                 document.getElementById('health-status').innerHTML = `
                     <div class="status error">
                         <strong>App Status:</strong> Error<br>
