@@ -764,3 +764,61 @@ app.listen(port, () => {
 });
 
 export default app;
+
+// Test metafields endpoint (for debugging)
+app.get('/test-metafields/:productId', async (req, res) => {
+  try {
+    const { productId } = req.params;
+    
+    // Fetch product with metafields using GraphQL
+    const query = `
+      query GetProductMetafields($id: ID!) {
+        product(id: $id) {
+          id
+          title
+          metafields(first: 20) {
+            edges {
+              node {
+                namespace
+                key
+                value
+                type
+              }
+            }
+          }
+        }
+      }
+    `;
+    
+    const response = await fetch(`https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-07/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query,
+        variables: { id: `gid://shopify/Product/${productId}` }
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`GraphQL request failed: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    
+    res.json({
+      productId,
+      title: data.data.product.title,
+      metafields: data.data.product.metafields.edges.map(edge => edge.node),
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message,
+      productId: req.params.productId
+    });
+  }
+});
