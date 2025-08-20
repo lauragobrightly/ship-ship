@@ -204,9 +204,16 @@
                     </div>
                 </div>
                 
-                <div class="form-group">
-                    <label for="description">Description</label>
-                    <input type="text" id="description" name="description">
+                <div class="grid">
+                    <div class="form-group">
+                        <label for="rts-description">Ready-to-Ship Description</label>
+                        <input type="text" id="rts-description" name="rts-description">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="po-description">Pre-Order Description</label>
+                        <input type="text" id="po-description" name="po-description">
+                    </div>
                 </div>
                 
                 <button type="submit">Save Configuration</button>
@@ -258,7 +265,8 @@
                 document.getElementById('fee').value = config.feeUnderThreshold / 100;
                 document.getElementById('rts-label').value = config.labels.rts;
                 document.getElementById('po-label').value = config.labels.po;
-                document.getElementById('description').value = config.description;
+                document.getElementById('rts-description').value = config.descriptions.rts;
+                document.getElementById('po-description').value = config.descriptions.po;
                 document.getElementById('kill-switch').checked = config.killSwitch;
                 
                 updateKillSwitchStatus(config.killSwitch);
@@ -279,7 +287,10 @@
                     rts: formData.get('rts-label'),
                     po: formData.get('po-label')
                 },
-                description: formData.get('description')
+                descriptions: {
+                    rts: formData.get('rts-description'),
+                    po: formData.get('po-description')
+                }
             };
             
             try {
@@ -380,11 +391,6 @@
         document.getElementById('health-check').addEventListener('click', async () => {
             try {
                 const response = await fetch('/health');
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-                
                 const health = await response.json();
                 
                 document.getElementById('health-status').innerHTML = `
