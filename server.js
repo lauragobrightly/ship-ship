@@ -657,12 +657,12 @@ app.get('/config', (req, res) => {
 });
 
 app.post('/config', (req, res) => {
-  const { threshold, feeUnderThreshold, labels, description, killSwitch } = req.body;
+  const { threshold, feeUnderThreshold, labels, descriptions, killSwitch } = req.body;
   
   if (threshold !== undefined) appConfig.threshold = threshold;
   if (feeUnderThreshold !== undefined) appConfig.feeUnderThreshold = feeUnderThreshold;
   if (labels) appConfig.labels = { ...appConfig.labels, ...labels };
-  if (description !== undefined) appConfig.description = description;
+  if (descriptions) appConfig.descriptions = { ...appConfig.descriptions, ...descriptions };
   if (killSwitch !== undefined) appConfig.killSwitch = killSwitch;
   
   res.json({ success: true, config: appConfig });
