@@ -587,7 +587,7 @@ app.post('/rates', async (req, res) => {
         service_code: "RTS_STD",
         total_price: rtsPrice.toString(),
         currency: appConfig.currency,
-        description: appConfig.description
+        description: appConfig.descriptions.rts
       });
     }
     
@@ -599,7 +599,7 @@ app.post('/rates', async (req, res) => {
         service_code: "PO_STD",
         total_price: poPrice.toString(),
         currency: appConfig.currency,
-        description: appConfig.description
+        description: appConfig.descriptions.po
       });
     }
     
