@@ -92,7 +92,10 @@ const appConfig = {
     rts: "Ships Now (In-Stock)",
     po: "Ships Later (Pre-Order)"
   },
-  description: "Free over $50",
+  descriptions: {                
+    rts: "Ready to ship",
+    po: "Free over $50"
+  },
   killSwitch: false, // Turn on during promos
   currency: "USD"
 };
