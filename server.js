@@ -561,6 +561,45 @@ app.post('/rates', async (req, res) => {
         }]
       });
     }
+
+    // Check for promotion items first (if promotion is enabled)
+if (appConfig.promotion.enabled) {
+  const promoItems = [];
+  const nonPromoItems = [];
+  
+  for (const item of rate.items) {
+    // Check if item has promotion tag
+    const itemTags = item.tags || [];
+    const hasPromoTag = itemTags.some(tag => 
+      tag.toLowerCase().includes(appConfig.promotion.tag.toLowerCase())
+    ) || item.title.toLowerCase().includes(appConfig.promotion.tag.toLowerCase());
+    
+    if (hasPromoTag) {
+      promoItems.push(item);
+    } else {
+      nonPromoItems.push(item);
+    }
+  }
+  
+  // If ALL items are promotion items, return only promotion rate
+  if (promoItems.length > 0 && nonPromoItems.length === 0) {
+    const processingTime = Date.now() - startTime;
+    console.log(`Promotion-only cart detected in ${processingTime}ms`);
+    
+    return res.json({
+      rates: [{
+        service_name: appConfig.labels.promo,
+        service_code: "PROMO_FLAT",
+        total_price: appConfig.promotion.flatRate.toString(),
+        currency: appConfig.currency,
+        description: appConfig.descriptions.promo
+      }]
+    });
+  }
+  
+  // TODO: Handle mixed promo + regular items (could add logic later)
+  // For now, mixed carts fall through to normal RTS/PO logic
+}
     
     // Get variant IDs
     const variantIds = rate.items.map(item => item.variant_id.toString());
@@ -664,12 +703,13 @@ app.get('/config', (req, res) => {
 });
 
 app.post('/config', (req, res) => {
-  const { threshold, feeUnderThreshold, labels, descriptions, killSwitch } = req.body;
+  const { threshold, feeUnderThreshold, labels, descriptions, promotion, killSwitch } = req.body;
   
   if (threshold !== undefined) appConfig.threshold = threshold;
   if (feeUnderThreshold !== undefined) appConfig.feeUnderThreshold = feeUnderThreshold;
   if (labels) appConfig.labels = { ...appConfig.labels, ...labels };
   if (descriptions) appConfig.descriptions = { ...appConfig.descriptions, ...descriptions };
+  if (promotion) appConfig.promotion = { ...appConfig.promotion, ...promotion };
   if (killSwitch !== undefined) appConfig.killSwitch = killSwitch;
   
   res.json({ success: true, config: appConfig });
