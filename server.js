@@ -90,11 +90,18 @@ const appConfig = {
   feeUnderThreshold: 500, // $5 in cents
   labels: {
     rts: "Ships Now (In-Stock)",
-    po: "Ships Later (Pre-Order)"
+    po: "Ships Later (Pre-Order)",
+    promo: "Promotion Shipping"
   },
-  descriptions: {                
+  descriptions: {
     rts: "Ready to ship",
-    po: "Free over $50"
+    po: "Free over $50",
+    promo: "Flat rate per order"
+  },
+  promotion: {
+    enabled: false,
+    flatRate: 695, // $6.95 in cents
+    tag: "promotion"
   },
   killSwitch: false, // Turn on during promos
   currency: "USD"
