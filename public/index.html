@@ -50,12 +50,19 @@
             font-weight: 500;
         }
         
-        input, textarea {
+        input, textarea, select {
             width: 100%;
             padding: 8px 12px;
             border: 1px solid #ddd;
             border-radius: 4px;
             font-size: 14px;
+        }
+        
+        small {
+            display: block;
+            color: #666;
+            font-size: 12px;
+            margin-top: 5px;
         }
         
         button {
@@ -66,6 +73,8 @@
             border-radius: 4px;
             cursor: pointer;
             font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
         }
         
         button:hover {
@@ -86,6 +95,14 @@
         
         .success:hover {
             background: #218838;
+        }
+        
+        .info {
+            background: #17a2b8;
+        }
+        
+        .info:hover {
+            background: #138496;
         }
         
         .kill-switch, .promo-toggle {
@@ -161,6 +178,18 @@
             border: 1px solid #f5c6cb;
         }
         
+        .status.warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
         .grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -171,6 +200,27 @@
             display: grid;
             grid-template-columns: 1fr 1fr 1fr;
             gap: 15px;
+        }
+        
+        .test-section {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 15px;
+            border: 1px solid #dee2e6;
+        }
+        
+        .test-section h4 {
+            margin-bottom: 10px;
+            color: #495057;
+        }
+        
+        .warning-box {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 15px;
         }
         
         @media (max-width: 768px) {
@@ -214,7 +264,7 @@
                     </div>
                     
                     <div class="form-group">
-                        <label for="promo-label">Promotion Label</label>
+                        <label for="promo-label">Mystery Box Label</label>
                         <input type="text" id="promo-label" name="promo-label">
                     </div>
                 </div>
@@ -231,7 +281,7 @@
                     </div>
                     
                     <div class="form-group">
-                        <label for="promo-description">Promotion Description</label>
+                        <label for="promo-description">Mystery Box Description</label>
                         <input type="text" id="promo-description" name="promo-description">
                     </div>
                 </div>
@@ -241,29 +291,57 @@
         </div>
 
         <div class="card">
-            <h2>Promotion Settings</h2>
+            <h2>🎁 Mystery Box Promotion</h2>
+            <p>When enabled, any order containing mystery box products will use a flat shipping rate instead of the normal RTS/Pre-Order logic.</p>
+            
             <div class="promo-toggle">
                 <label class="switch">
                     <input type="checkbox" id="promo-enabled">
                     <span class="slider"></span>
                 </label>
-                <span id="promo-status">OFF - Promotion shipping disabled</span>
+                <span id="promo-status">OFF - Mystery Box promotion disabled</span>
             </div>
             
             <div id="promo-config" style="margin-top: 20px; display: none;">
                 <div class="grid">
                     <div class="form-group">
-                        <label for="promo-rate">Flat Shipping Rate ($)</label>
-                        <input type="number" id="promo-rate" name="promo-rate" step="0.01" min="0">
+                        <label for="promo-rate">Mystery Box Shipping Rate ($)</label>
+                        <input type="number" id="promo-rate" name="promo-rate" step="0.01" min="0" value="6.95">
+                        <small>Flat rate applied to any order containing mystery box items</small>
                     </div>
                     
                     <div class="form-group">
-                        <label for="promo-tag">Product Tag (trigger promotion)</label>
-                        <input type="text" id="promo-tag" name="promo-tag" placeholder="e.g., mysterybox">
+                        <label for="promo-tag">Detection Tag</label>
+                        <input type="text" id="promo-tag" name="promo-tag" value="mysterybox" readonly>
+                        <small>Products with this tag (or "mystery box" in title) trigger promotion</small>
                     </div>
                 </div>
                 
-                <button type="button" id="save-promo">Save Promotion Settings</button>
+                <div class="test-section">
+                    <h4>🔍 Test Mystery Box Detection</h4>
+                    <div class="grid">
+                        <div class="form-group">
+                            <input type="number" id="test-product-id" placeholder="Enter Product ID to test" style="margin-bottom: 10px;">
+                        </div>
+                        <div>
+                            <button type="button" id="test-detection" class="info">Test Detection</button>
+                        </div>
+                    </div>
+                    <div id="detection-result" style="margin-top: 10px; display: none;"></div>
+                </div>
+                
+                <button type="button" id="save-promo" class="success">💾 Save Mystery Box Settings</button>
+            </div>
+            
+            <div class="warning-box">
+                <strong>🚨 Important:</strong> When promotion is ON, any order containing mystery box items will ONLY show the flat rate option. Regular RTS/Pre-Order rates will not appear for these orders.
+                <br><br>
+                <strong>Detection methods:</strong>
+                <ul style="margin-top: 10px; padding-left: 20px;">
+                    <li>Product tags containing: "mysterybox", "mystery-box", or "mystery box"</li>
+                    <li>Product title containing: "mystery box" or "mysterybox"</li>
+                    <li>Item title containing: "mystery box" or "mysterybox" (fallback)</li>
+                </ul>
             </div>
         </div>
         
@@ -282,11 +360,11 @@
         
         <div class="card">
             <h2>Cache Management</h2>
-            <p>Manage variant metafield cache for better performance.</p>
+            <p>Manage variant and product cache for better performance.</p>
             
-            <div style="display: flex; gap: 10px; margin-top: 15px;">
+            <div style="display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap;">
                 <button id="cache-stats" class="success">View Cache Stats</button>
-                <button id="clear-cache" class="danger">Clear Cache</button>
+                <button id="clear-cache" class="danger">Clear All Cache</button>
             </div>
             
             <div id="cache-info" style="margin-top: 15px;"></div>
@@ -386,7 +464,7 @@
                 });
                 
                 if (response.ok) {
-                    showStatus(`Promotion shipping ${enabled ? 'enabled' : 'disabled'}!`, 'success');
+                    showStatus(`Mystery Box promotion ${enabled ? 'enabled' : 'disabled'}!`, 'success');
                 } else {
                     throw new Error('Failed to update promotion settings');
                 }
@@ -421,7 +499,7 @@
                 });
                 
                 if (response.ok) {
-                    showStatus('Promotion settings saved successfully!', 'success');
+                    showStatus('Mystery Box settings saved successfully!', 'success');
                 } else {
                     throw new Error('Failed to save promotion settings');
                 }
@@ -430,17 +508,65 @@
             }
         });
         
+        // Test product detection
+        document.getElementById('test-detection').addEventListener('click', async () => {
+            const productId = document.getElementById('test-product-id').value;
+            const resultDiv = document.getElementById('detection-result');
+            
+            if (!productId) {
+                resultDiv.style.display = 'block';
+                resultDiv.className = 'status error';
+                resultDiv.innerHTML = 'Please enter a Product ID';
+                return;
+            }
+            
+            // Show loading state
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'status info';
+            resultDiv.innerHTML = '🔄 Testing product detection...';
+            
+            try {
+                const response = await fetch(`/test-product-detection/${productId}`);
+                const result = await response.json();
+                
+                if (response.ok) {
+                    if (result.isMysteryBox) {
+                        resultDiv.className = 'status success';
+                        resultDiv.innerHTML = `✅ <strong>Mystery Box Detected!</strong><br>
+                            <strong>Product:</strong> ${result.title}<br>
+                            <strong>Tags:</strong> ${result.tags}<br>
+                            <strong>Detection Method:</strong> ${result.detectionMethod}<br>
+                            <strong>Tag Match:</strong> ${result.tagMatch ? 'Yes' : 'No'}<br>
+                            <strong>Title Match:</strong> ${result.titleMatch ? 'Yes' : 'No'}`;
+                    } else {
+                        resultDiv.className = 'status warning';
+                        resultDiv.innerHTML = `ℹ️ <strong>Not a Mystery Box</strong><br>
+                            <strong>Product:</strong> ${result.title}<br>
+                            <strong>Tags:</strong> ${result.tags}<br>
+                            <em>Add "mysterybox" tag or "mystery box" in title to enable promotion</em>`;
+                    }
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (error) {
+                resultDiv.className = 'status error';
+                resultDiv.innerHTML = `❌ <strong>Error testing product:</strong> ${error.message}`;
+            }
+        });
+        
         function updatePromoStatus(isOn) {
             const status = document.getElementById('promo-status');
             const config = document.getElementById('promo-config');
             
             if (isOn) {
-                status.textContent = 'ON - Promotion shipping active';
+                status.textContent = 'ON - Mystery Box flat rate active ($6.95)';
                 status.style.color = '#28a745';
+                status.style.fontWeight = 'bold';
                 config.style.display = 'block';
             } else {
-                status.textContent = 'OFF - Promotion shipping disabled';
+                status.textContent = 'OFF - Mystery Box promotion disabled';
                 status.style.color = '#666';
+                status.style.fontWeight = 'normal';
                 config.style.display = 'none';
             }
         }
@@ -492,7 +618,9 @@
                         <strong>Cache Stats:</strong><br>
                         Redis Connected: ${stats.redis_connected ? 'Yes' : 'No'}<br>
                         Cached Variants: ${stats.cached_variants}<br>
-                        Cache Prefix: ${stats.cache_prefix}
+                        Cached Products: ${stats.cached_products || 0}<br>
+                        Cache Types: Variant pre-order status, Product data for mystery box detection<br>
+                        PreProduct API: ${stats.preproduct_api}
                     </div>
                 `;
                 console.log('Redis Memory Info:', stats.memory_info);
@@ -502,7 +630,7 @@
         });
         
         document.getElementById('clear-cache').addEventListener('click', async () => {
-            if (!confirm('Are you sure you want to clear the cache? This will force fresh lookups for all variant metafields.')) {
+            if (!confirm('Are you sure you want to clear the cache? This will force fresh lookups for all variant and product data.')) {
                 return;
             }
             
@@ -512,7 +640,9 @@
                 
                 document.getElementById('cache-info').innerHTML = `
                     <div class="status success">
-                        Cache cleared! Removed ${result.cleared} cached entries.
+                        Cache cleared! Removed ${result.cleared} total entries:<br>
+                        • ${result.variants} variant cache entries<br>
+                        • ${result.products} product cache entries
                     </div>
                 `;
             } catch (error) {
