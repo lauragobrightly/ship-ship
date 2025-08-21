@@ -91,7 +91,7 @@ const appConfig = {
   labels: {
     rts: "Ships Now (In-Stock)",
     po: "Ships Later (Pre-Order)",
-    promo: "Promotion Shipping"
+    promo: "Mystery Box Shipping"
   },
   descriptions: {
     rts: "Ready to ship",
@@ -101,7 +101,7 @@ const appConfig = {
   promotion: {
     enabled: false,
     flatRate: 695, // $6.95 in cents
-    tag: "promotion"
+    tag: "mysterybox"
   },
   killSwitch: false, // Turn on during promos
   currency: "USD"
@@ -109,6 +109,9 @@ const appConfig = {
 
 // Cache TTL (24 hours)
 const CACHE_TTL = 24 * 60 * 60;
+
+// Cache TTL for product data (1 hour)
+const PRODUCT_CACHE_TTL = 3600;
 
 // Utility functions
 function verifyWebhook(data, hmacHeader) {
@@ -150,6 +153,50 @@ async function setCachedVariantPreOrder(variantId, isPreOrder) {
   } catch (error) {
     console.warn('Cache write error:', error);
   }
+}
+
+// Helper function to get cached product data
+async function getCachedProductData(productId) {
+  const cacheKey = `product_data_${productId}`;
+  
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  } catch (error) {
+    console.warn('Product cache read error:', error);
+  }
+  
+  // Fetch from Shopify API
+  try {
+    const response = await fetch(`https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-07/products/${productId}.json`, {
+      headers: {
+        'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
+      }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      const productData = {
+        title: data.product.title,
+        tags: data.product.tags || ''
+      };
+      
+      // Cache the result
+      try {
+        await redis.setEx(cacheKey, PRODUCT_CACHE_TTL, JSON.stringify(productData));
+      } catch (error) {
+        console.warn('Product cache write error:', error);
+      }
+      
+      return productData;
+    }
+  } catch (error) {
+    console.error(`Error fetching product ${productId}:`, error);
+  }
+  
+  return null;
 }
 
 // Get product ID from variant ID using Shopify API
@@ -562,44 +609,78 @@ app.post('/rates', async (req, res) => {
       });
     }
 
-    // Check for promotion items first (if promotion is enabled)
-if (appConfig.promotion.enabled) {
-  const promoItems = [];
-  const nonPromoItems = [];
-  
-  for (const item of rate.items) {
-    // Check if item has promotion tag
-    const itemTags = item.tags || [];
-    const hasPromoTag = itemTags.some(tag => 
-      tag.toLowerCase().includes(appConfig.promotion.tag.toLowerCase())
-    ) || item.title.toLowerCase().includes(appConfig.promotion.tag.toLowerCase());
-    
-    if (hasPromoTag) {
-      promoItems.push(item);
-    } else {
-      nonPromoItems.push(item);
+    // Check for mystery box items first (if promotion is enabled)
+    if (appConfig.promotion.enabled) {
+      const mysteryBoxItems = [];
+      const nonMysteryBoxItems = [];
+      
+      // Get unique product IDs to minimize API calls
+      const uniqueProductIds = [...new Set(rate.items.map(item => item.product_id))];
+      
+      // Fetch product data (with caching) for unique products
+      const productDataMap = new Map();
+      const productPromises = uniqueProductIds.map(async (productId) => {
+        const productData = await getCachedProductData(productId);
+        if (productData) {
+          productDataMap.set(productId, productData);
+        }
+        return productData;
+      });
+      
+      await Promise.all(productPromises);
+      
+      // Check each item for mystery box tag using cached product data
+      for (const item of rate.items) {
+        const productData = productDataMap.get(item.product_id);
+        let isMysteryBox = false;
+        
+        if (productData) {
+          // Check product tags for mystery box
+          const productTags = productData.tags ? productData.tags.split(',').map(tag => tag.trim().toLowerCase()) : [];
+          isMysteryBox = productTags.some(tag => 
+            tag.includes('mysterybox') || 
+            tag.includes('mystery-box') || 
+            tag.includes('mystery box')
+          );
+          
+          // Also check product title as fallback
+          if (!isMysteryBox) {
+            const titleLower = productData.title.toLowerCase();
+            isMysteryBox = titleLower.includes('mystery box') || titleLower.includes('mysterybox');
+          }
+        }
+        
+        // Fallback: check item title if we couldn't get product data
+        if (!isMysteryBox && !productData) {
+          const itemTitleLower = item.title.toLowerCase();
+          isMysteryBox = itemTitleLower.includes('mystery box') || itemTitleLower.includes('mysterybox');
+        }
+        
+        if (isMysteryBox) {
+          mysteryBoxItems.push(item);
+        } else {
+          nonMysteryBoxItems.push(item);
+        }
+      }
+      
+      // If ANY items are mystery boxes, return only the flat rate promotion shipping
+      if (mysteryBoxItems.length > 0) {
+        const processingTime = Date.now() - startTime;
+        console.log(`Mystery Box cart detected (${mysteryBoxItems.length} mystery box items, ${nonMysteryBoxItems.length} regular items) in ${processingTime}ms`);
+        
+        return res.json({
+          rates: [{
+            service_name: appConfig.labels.promo,
+            service_code: "MYSTERY_BOX_FLAT",
+            total_price: appConfig.promotion.flatRate.toString(),
+            currency: appConfig.currency,
+            description: appConfig.descriptions.promo
+          }]
+        });
+      }
+      
+      // If no mystery box items, continue with normal RTS/PO logic below
     }
-  }
-  
-  // If ALL items are promotion items, return only promotion rate
-  if (promoItems.length > 0 && nonPromoItems.length === 0) {
-    const processingTime = Date.now() - startTime;
-    console.log(`Promotion-only cart detected in ${processingTime}ms`);
-    
-    return res.json({
-      rates: [{
-        service_name: appConfig.labels.promo,
-        service_code: "PROMO_FLAT",
-        total_price: appConfig.promotion.flatRate.toString(),
-        currency: appConfig.currency,
-        description: appConfig.descriptions.promo
-      }]
-    });
-  }
-  
-  // TODO: Handle mixed promo + regular items (could add logic later)
-  // For now, mixed carts fall through to normal RTS/PO logic
-}
     
     // Get variant IDs
     const variantIds = rate.items.map(item => item.variant_id.toString());
@@ -689,6 +770,15 @@ app.post('/webhook/product-update', express.raw({ type: 'application/json' }), a
       console.log(`Cache invalidated for product ${product.id} with ${product.variants.length} variants`);
     }
     
+    // NEW: Invalidate product cache for mystery box detection
+    const productCacheKey = `product_data_${product.id}`;
+    try {
+      await redis.del(productCacheKey);
+      console.log(`Product cache invalidated for product ${product.id}`);
+    } catch (error) {
+      console.warn('Product cache deletion error:', error);
+    }
+    
     res.status(200).send('OK');
     
   } catch (error) {
@@ -723,12 +813,14 @@ app.get('/cache/stats', async (req, res) => {
     }
     
     const info = await redis.info('memory');
-    const keys = await redis.keys('preproduct_variant_*');
+    const variantKeys = await redis.keys('preproduct_variant_*');
+    const productKeys = await redis.keys('product_data_*');
     
     res.json({
       redis_connected: redis.isReady,
-      cached_variants: keys.length,
-      cache_prefix: 'preproduct_variant_',
+      cached_variants: variantKeys.length,
+      cached_products: productKeys.length,
+      cache_prefixes: ['preproduct_variant_', 'product_data_'],
       memory_info: info,
       preproduct_api: process.env.PREPRODUCT_API_TOKEN ? 'configured' : 'missing'
     });
@@ -744,11 +836,19 @@ app.post('/cache/clear', async (req, res) => {
       return res.status(503).json({ error: 'Redis not connected' });
     }
     
-    const keys = await redis.keys('preproduct_variant_*');
-    if (keys.length > 0) {
-      await redis.del(keys);
+    const variantKeys = await redis.keys('preproduct_variant_*');
+    const productKeys = await redis.keys('product_data_*');
+    const allKeys = [...variantKeys, ...productKeys];
+    
+    if (allKeys.length > 0) {
+      await redis.del(allKeys);
     }
-    res.json({ cleared: keys.length });
+    
+    res.json({ 
+      cleared: allKeys.length,
+      variants: variantKeys.length,
+      products: productKeys.length
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -771,6 +871,66 @@ app.get('/test-preproduct/:productId/:variantId', async (req, res) => {
       error: error.message,
       productId: req.params.productId,
       variantId: req.params.variantId
+    });
+  }
+});
+
+// Test endpoint for mystery box detection (with caching)
+app.get('/test-product-detection/:productId', async (req, res) => {
+  try {
+    const { productId } = req.params;
+    
+    // Use the same cached function as the main logic
+    const productData = await getCachedProductData(productId);
+    
+    if (!productData) {
+      throw new Error('Product not found or API error');
+    }
+    
+    // Check for mystery box detection using same logic as main function
+    let isMysteryBox = false;
+    let detectionMethod = 'none';
+    
+    // Check product tags
+    const productTags = productData.tags ? productData.tags.split(',').map(tag => tag.trim().toLowerCase()) : [];
+    const hasTagMatch = productTags.some(tag => 
+      tag.includes('mysterybox') || 
+      tag.includes('mystery-box') || 
+      tag.includes('mystery box')
+    );
+    
+    // Check product title
+    const titleLower = productData.title.toLowerCase();
+    const hasTitleMatch = titleLower.includes('mystery box') || titleLower.includes('mysterybox');
+    
+    if (hasTagMatch && hasTitleMatch) {
+      isMysteryBox = true;
+      detectionMethod = 'Both tag and title';
+    } else if (hasTagMatch) {
+      isMysteryBox = true;
+      detectionMethod = 'Product tag';
+    } else if (hasTitleMatch) {
+      isMysteryBox = true;
+      detectionMethod = 'Product title';
+    }
+    
+    res.json({
+      productId: productId,
+      title: productData.title,
+      tags: productData.tags || 'No tags',
+      isMysteryBox: isMysteryBox,
+      detectionMethod: detectionMethod,
+      tagMatch: hasTagMatch,
+      titleMatch: hasTitleMatch,
+      cached: true,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Product detection test error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      productId: req.params.productId
     });
   }
 });
