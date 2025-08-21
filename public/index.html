@@ -19,7 +19,7 @@
         }
         
         .container {
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
             padding: 20px;
         }
@@ -88,7 +88,7 @@
             background: #218838;
         }
         
-        .kill-switch {
+        .kill-switch, .promo-toggle {
             display: flex;
             align-items: center;
             gap: 10px;
@@ -132,11 +132,15 @@
         }
         
         input:checked + .slider {
-            background-color: #dc3545;
+            background-color: #28a745;
         }
         
         input:checked + .slider:before {
             transform: translateX(26px);
+        }
+        
+        .kill-switch input:checked + .slider {
+            background-color: #dc3545;
         }
         
         .status {
@@ -163,8 +167,14 @@
             gap: 15px;
         }
         
+        .grid-3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
+        }
+        
         @media (max-width: 768px) {
-            .grid {
+            .grid, .grid-3 {
                 grid-template-columns: 1fr;
             }
         }
@@ -192,7 +202,7 @@
                     </div>
                 </div>
                 
-                <div class="grid">
+                <div class="grid-3">
                     <div class="form-group">
                         <label for="rts-label">Ready-to-Ship Label</label>
                         <input type="text" id="rts-label" name="rts-label">
@@ -202,9 +212,14 @@
                         <label for="po-label">Pre-Order Label</label>
                         <input type="text" id="po-label" name="po-label">
                     </div>
+                    
+                    <div class="form-group">
+                        <label for="promo-label">Promotion Label</label>
+                        <input type="text" id="promo-label" name="promo-label">
+                    </div>
                 </div>
                 
-                <div class="grid">
+                <div class="grid-3">
                     <div class="form-group">
                         <label for="rts-description">Ready-to-Ship Description</label>
                         <input type="text" id="rts-description" name="rts-description">
@@ -214,10 +229,42 @@
                         <label for="po-description">Pre-Order Description</label>
                         <input type="text" id="po-description" name="po-description">
                     </div>
+                    
+                    <div class="form-group">
+                        <label for="promo-description">Promotion Description</label>
+                        <input type="text" id="promo-description" name="promo-description">
+                    </div>
                 </div>
                 
                 <button type="submit">Save Configuration</button>
             </form>
+        </div>
+
+        <div class="card">
+            <h2>Promotion Settings</h2>
+            <div class="promo-toggle">
+                <label class="switch">
+                    <input type="checkbox" id="promo-enabled">
+                    <span class="slider"></span>
+                </label>
+                <span id="promo-status">OFF - Promotion shipping disabled</span>
+            </div>
+            
+            <div id="promo-config" style="margin-top: 20px; display: none;">
+                <div class="grid">
+                    <div class="form-group">
+                        <label for="promo-rate">Flat Shipping Rate ($)</label>
+                        <input type="number" id="promo-rate" name="promo-rate" step="0.01" min="0">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="promo-tag">Product Tag (trigger promotion)</label>
+                        <input type="text" id="promo-tag" name="promo-tag" placeholder="e.g., mysterybox">
+                    </div>
+                </div>
+                
+                <button type="button" id="save-promo">Save Promotion Settings</button>
+            </div>
         </div>
         
         <div class="card">
@@ -265,17 +312,25 @@
                 document.getElementById('fee').value = config.feeUnderThreshold / 100;
                 document.getElementById('rts-label').value = config.labels.rts;
                 document.getElementById('po-label').value = config.labels.po;
+                document.getElementById('promo-label').value = config.labels.promo;
                 document.getElementById('rts-description').value = config.descriptions.rts;
                 document.getElementById('po-description').value = config.descriptions.po;
+                document.getElementById('promo-description').value = config.descriptions.promo;
                 document.getElementById('kill-switch').checked = config.killSwitch;
                 
+                // Promotion settings
+                document.getElementById('promo-enabled').checked = config.promotion.enabled;
+                document.getElementById('promo-rate').value = config.promotion.flatRate / 100;
+                document.getElementById('promo-tag').value = config.promotion.tag;
+                
                 updateKillSwitchStatus(config.killSwitch);
+                updatePromoStatus(config.promotion.enabled);
             } catch (error) {
                 showStatus('Error loading configuration: ' + error.message, 'error');
             }
         }
         
-        // Save configuration
+        // Save main configuration
         document.getElementById('config-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             
@@ -285,11 +340,13 @@
                 feeUnderThreshold: Math.round(parseFloat(formData.get('fee')) * 100),
                 labels: {
                     rts: formData.get('rts-label'),
-                    po: formData.get('po-label')
+                    po: formData.get('po-label'),
+                    promo: formData.get('promo-label')
                 },
                 descriptions: {
                     rts: formData.get('rts-description'),
-                    po: formData.get('po-description')
+                    po: formData.get('po-description'),
+                    promo: formData.get('promo-description')
                 }
             };
             
@@ -311,6 +368,82 @@
                 showStatus('Error saving configuration: ' + error.message, 'error');
             }
         });
+        
+        // Promotion toggle handler
+        document.getElementById('promo-enabled').addEventListener('change', async (e) => {
+            const enabled = e.target.checked;
+            updatePromoStatus(enabled);
+            
+            try {
+                const response = await fetch('/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ 
+                        promotion: { enabled: enabled }
+                    })
+                });
+                
+                if (response.ok) {
+                    showStatus(`Promotion shipping ${enabled ? 'enabled' : 'disabled'}!`, 'success');
+                } else {
+                    throw new Error('Failed to update promotion settings');
+                }
+            } catch (error) {
+                showStatus('Error updating promotion: ' + error.message, 'error');
+                e.target.checked = !enabled;
+            }
+        });
+        
+        // Save promotion settings
+        document.getElementById('save-promo').addEventListener('click', async () => {
+            const flatRate = Math.round(parseFloat(document.getElementById('promo-rate').value) * 100);
+            const tag = document.getElementById('promo-tag').value.trim();
+            
+            if (!tag) {
+                showStatus('Please enter a product tag for promotion detection', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        promotion: {
+                            flatRate: flatRate,
+                            tag: tag
+                        }
+                    })
+                });
+                
+                if (response.ok) {
+                    showStatus('Promotion settings saved successfully!', 'success');
+                } else {
+                    throw new Error('Failed to save promotion settings');
+                }
+            } catch (error) {
+                showStatus('Error saving promotion settings: ' + error.message, 'error');
+            }
+        });
+        
+        function updatePromoStatus(isOn) {
+            const status = document.getElementById('promo-status');
+            const config = document.getElementById('promo-config');
+            
+            if (isOn) {
+                status.textContent = 'ON - Promotion shipping active';
+                status.style.color = '#28a745';
+                config.style.display = 'block';
+            } else {
+                status.textContent = 'OFF - Promotion shipping disabled';
+                status.style.color = '#666';
+                config.style.display = 'none';
+            }
+        }
         
         // Kill switch handler
         document.getElementById('kill-switch').addEventListener('change', async (e) => {
