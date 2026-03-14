@@ -220,33 +220,36 @@ async function getProductIdFromVariant(variantId) {
   }
 }
 
-// Call PreProduct API to check if variant is pre-order
+// Call Batchy API to check if variant is pre-order
 async function fetchPreProductStatus(productId, variantId) {
+  const batchyUrl = process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app';
+  const batchyApiKey = process.env.BATCHY_API_KEY;
+
   try {
-    const url = `https://api.preproduct.io/api/v2/on_preorder/${productId}?any_variant=false&variant_ids=${variantId}`;
-    
+    const url = `${batchyUrl}/api/v1/variant-status/${productId}/${variantId}`;
+
     const response = await fetch(url, {
       headers: {
-        'Authorization': process.env.PREPRODUCT_API_TOKEN,
+        'Authorization': `Bearer ${batchyApiKey}`,
         'Content-Type': 'application/json'
       }
     });
-    
+
     if (!response.ok) {
-      throw new Error(`PreProduct API failed: ${response.status} ${await response.text()}`);
+      throw new Error(`Batchy API failed: ${response.status} ${await response.text()}`);
     }
-    
-const data = await response.json();
 
-// Debug logging
-console.log('PreProduct API raw response:', JSON.stringify(data));
-console.log('data.on_preorder value:', data.on_preorder);
+    const data = await response.json();
 
-// PreProduct API returns {on_preorder: true/false}
-return data.on_preorder || false;
-    
+    // Debug logging
+    console.log('Batchy API raw response:', JSON.stringify(data));
+    console.log('data.isPreOrder value:', data.isPreOrder);
+
+    // Batchy API returns {isPreOrder: true/false, status: "IN_STOCK"|"PREORDER_OPEN"|etc.}
+    return data.isPreOrder || false;
+
   } catch (error) {
-    console.error('Error calling PreProduct API:', error);
+    console.error('Error calling Batchy API:', error);
     return false; // Default to not pre-order on error
   }
 }
@@ -499,7 +502,8 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     redis: redis.isReady ? 'connected' : 'disconnected',
-    preproduct_api: process.env.PREPRODUCT_API_TOKEN ? 'configured' : 'missing'
+    batchy_api: process.env.BATCHY_API_KEY ? 'configured' : 'missing',
+    batchy_url: process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'
   });
 });
 
@@ -822,7 +826,7 @@ app.get('/cache/stats', async (req, res) => {
       cached_products: productKeys.length,
       cache_prefixes: ['preproduct_variant_', 'product_data_'],
       memory_info: info,
-      preproduct_api: process.env.PREPRODUCT_API_TOKEN ? 'configured' : 'missing'
+      batchy_api: process.env.BATCHY_API_KEY ? 'configured' : 'missing'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -970,7 +974,8 @@ app.listen(port, () => {
   console.log(`Ship Ship Hooray running on port ${port}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`App domain: ${process.env.APP_DOMAIN}`);
-  console.log(`PreProduct API: ${process.env.PREPRODUCT_API_TOKEN ? 'Configured' : 'Missing'}`);
+  console.log(`Batchy API: ${process.env.BATCHY_API_KEY ? 'Configured' : 'Missing'}`);
+  console.log(`Batchy URL: ${process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'}`);
 });
 
 export default app;
