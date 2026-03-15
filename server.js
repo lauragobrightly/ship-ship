@@ -594,6 +594,14 @@ app.post('/rates', async (req, res) => {
     if (rate.items.length === 0) {
       return res.json({ rates: [] });
     }
+
+    // International orders: return empty rates so Shopify uses its native
+    // international shipping profiles. No pre-order splitting for international.
+    const destCountry = rate.destination?.country || rate.destination?.country_code || '';
+    if (destCountry && destCountry !== 'US') {
+      console.log(`International order (${destCountry}) — deferring to Shopify native rates`);
+      return res.json({ rates: [] });
+    }
     
     // Check for gift cards only
     const isGiftCardsOnly = rate.items.every(item => 
