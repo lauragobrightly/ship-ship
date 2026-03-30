@@ -696,31 +696,64 @@ app.post('/rates', async (req, res) => {
     
     // Get variant IDs
     const variantIds = rate.items.map(item => item.variant_id.toString());
-    
+
     // Fetch pre-order status for all variants from PreProduct
     const variantStatuses = await getVariantPreOrderStatus(variantIds);
-    
-    // Calculate subtotals
+
+    // Calculate subtotals for THIS delivery group
     let rtsSubtotal = 0;
     let preorderSubtotal = 0;
-    
+
     for (const item of rate.items) {
       const variantId = item.variant_id.toString();
       const isPreOrder = variantStatuses.get(variantId) || false;
       const extended = item.price * item.quantity; // Price is in cents, pre-discount
-      
+
       if (isPreOrder) {
         preorderSubtotal += extended;
       } else {
         rtsSubtotal += extended;
       }
     }
-    
-    const rates = [];
-    
-    // Emit RTS rate if there are RTS items
+
+    // Cross-location free shipping: When Shopify splits an order across
+    // fulfillment locations, it calls /rates once per delivery group.
+    // Each group only sees its own items, so a $100 order split into
+    // $60 + $40 would charge $5 shipping on the $40 group.
+    // Fix: use Redis to track the combined RTS total across all groups
+    // for the same destination, so the $50 threshold applies to the full order.
+    let combinedRtsTotal = rtsSubtotal;
+    const dest = rate.destination || {};
+    const destKey = `ship:order:${dest.postal_code || ''}:${dest.address1 || ''}`.toLowerCase().replace(/\s+/g, '');
+
     if (rtsSubtotal > 0) {
-      const rtsPrice = rtsSubtotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold;
+      try {
+        // Store this group's RTS subtotal
+        const groupId = crypto.randomUUID();
+        await redis.set(`${destKey}:${groupId}`, rtsSubtotal.toString(), { EX: 30 });
+
+        // Small delay to let concurrent delivery group requests land
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        // Sum all RTS subtotals for this destination
+        const keys = await redis.keys(`${destKey}:*`);
+        if (keys.length > 1) {
+          const values = await redis.mGet(keys);
+          combinedRtsTotal = values.reduce((sum, v) => sum + (parseInt(v) || 0), 0);
+          console.log(`Cross-location order detected: ${keys.length} groups, combined RTS $${combinedRtsTotal/100}`);
+        }
+      } catch (e) {
+        console.log('Cross-location tracking error (non-fatal):', e.message);
+        // Fall back to per-group threshold
+      }
+    }
+
+    const rates = [];
+
+    // Emit RTS rate if there are RTS items
+    // Use combinedRtsTotal for threshold check (cross-location aware)
+    if (rtsSubtotal > 0) {
+      const rtsPrice = combinedRtsTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold;
       rates.push({
         service_name: appConfig.labels.rts,
         service_code: "RTS_STD",
@@ -729,7 +762,7 @@ app.post('/rates', async (req, res) => {
         description: appConfig.descriptions.rts
       });
     }
-    
+
     // Emit Pre-Order rate if there are PO items
     if (preorderSubtotal > 0) {
       const poPrice = preorderSubtotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold;
@@ -741,10 +774,10 @@ app.post('/rates', async (req, res) => {
         description: appConfig.descriptions.po
       });
     }
-    
+
     const processingTime = Date.now() - startTime;
     console.log(`Rates calculated in ${processingTime}ms for ${rate.items.length} items`);
-    console.log(`RTS subtotal: $${rtsSubtotal/100}, PO subtotal: $${preorderSubtotal/100}`);
+    console.log(`RTS subtotal: $${rtsSubtotal/100} (combined: $${combinedRtsTotal/100}), PO subtotal: $${preorderSubtotal/100}`);
     
     res.json({ rates });
     
