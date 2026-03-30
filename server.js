@@ -732,8 +732,10 @@ app.post('/rates', async (req, res) => {
         const groupId = crypto.randomUUID();
         await redis.set(`${destKey}:${groupId}`, rtsSubtotal.toString(), { EX: 30 });
 
-        // Small delay to let concurrent delivery group requests land
-        await new Promise(resolve => setTimeout(resolve, 200));
+        // Delay to let concurrent delivery group requests land.
+        // Shopify sends all delivery group requests near-simultaneously,
+        // but network latency means they arrive ~100-500ms apart.
+        await new Promise(resolve => setTimeout(resolve, 750));
 
         // Sum all RTS subtotals for this destination
         const keys = await redis.keys(`${destKey}:*`);
