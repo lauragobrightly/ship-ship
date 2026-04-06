@@ -1,6 +1,5 @@
 import express from 'express';
 import fetch from 'node-fetch';
-import { createClient } from 'redis';
 import crypto from 'crypto';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -17,20 +16,54 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Redis client for caching
-const redis = createClient({
-  url: process.env.REDIS_URL
-});
+// In-memory cache with TTL support
+const cache = new Map();
 
-redis.on('error', (err) => console.log('Redis Client Error', err));
-
-// Connect to Redis
-try {
-  await redis.connect();
-  console.log('Connected to Redis');
-} catch (error) {
-  console.error('Redis connection failed:', error);
+function cacheGet(key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.value;
 }
+
+function cacheSet(key, value, ttlSeconds) {
+  // Clear any existing timer for this key
+  const existing = cache.get(key);
+  if (existing && existing.timer) {
+    clearTimeout(existing.timer);
+  }
+  const timer = setTimeout(() => cache.delete(key), ttlSeconds * 1000);
+  cache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000, timer });
+}
+
+function cacheDel(key) {
+  const entry = cache.get(key);
+  if (entry && entry.timer) {
+    clearTimeout(entry.timer);
+  }
+  cache.delete(key);
+}
+
+function cacheKeys(pattern) {
+  // Simple glob-style pattern matching (supports trailing *)
+  const prefix = pattern.replace(/\*$/, '');
+  const keys = [];
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) {
+      const entry = cache.get(key);
+      // Skip expired entries
+      if (entry && Date.now() <= entry.expiresAt) {
+        keys.push(key);
+      }
+    }
+  }
+  return keys;
+}
+
+console.log('In-memory cache initialized');
 
 // Middleware
 app.use(helmet({
@@ -132,42 +165,28 @@ function verifyWebhook(data, hmacHeader) {
 }
 
 async function getCachedVariantPreOrder(variantId) {
-  try {
-    const cacheKey = `preproduct_variant_${variantId}`;
-    const cached = await redis.get(cacheKey);
-    
-    if (cached !== null) {
-      return JSON.parse(cached);
-    }
-  } catch (error) {
-    console.warn('Cache read error:', error);
+  const cacheKey = `preproduct_variant_${variantId}`;
+  const cached = cacheGet(cacheKey);
+  if (cached !== null) {
+    return cached;
   }
-  
   return null;
 }
 
 async function setCachedVariantPreOrder(variantId, isPreOrder) {
-  try {
-    const cacheKey = `preproduct_variant_${variantId}`;
-    await redis.setEx(cacheKey, CACHE_TTL, JSON.stringify(isPreOrder));
-  } catch (error) {
-    console.warn('Cache write error:', error);
-  }
+  const cacheKey = `preproduct_variant_${variantId}`;
+  cacheSet(cacheKey, isPreOrder, CACHE_TTL);
 }
 
 // Helper function to get cached product data
 async function getCachedProductData(productId) {
   const cacheKey = `product_data_${productId}`;
-  
-  try {
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached);
-    }
-  } catch (error) {
-    console.warn('Product cache read error:', error);
+
+  const cached = cacheGet(cacheKey);
+  if (cached) {
+    return cached;
   }
-  
+
   // Fetch from Shopify API
   try {
     const response = await fetch(`https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-07/products/${productId}.json`, {
@@ -175,27 +194,23 @@ async function getCachedProductData(productId) {
         'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
       }
     });
-    
+
     if (response.ok) {
       const data = await response.json();
       const productData = {
         title: data.product.title,
         tags: data.product.tags || ''
       };
-      
+
       // Cache the result
-      try {
-        await redis.setEx(cacheKey, PRODUCT_CACHE_TTL, JSON.stringify(productData));
-      } catch (error) {
-        console.warn('Product cache write error:', error);
-      }
-      
+      cacheSet(cacheKey, productData, PRODUCT_CACHE_TTL);
+
       return productData;
     }
   } catch (error) {
     console.error(`Error fetching product ${productId}:`, error);
   }
-  
+
   return null;
 }
 
@@ -501,7 +516,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    redis: redis.isReady ? 'connected' : 'disconnected',
+    cache: 'in-memory',
     batchy_api: process.env.BATCHY_API_KEY ? 'configured' : 'missing',
     batchy_url: process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'
   });
@@ -720,7 +735,7 @@ app.post('/rates', async (req, res) => {
     // fulfillment locations, it calls /rates once per delivery group.
     // Each group only sees its own items, so a $100 order split into
     // $60 + $40 would charge $5 shipping on the $40 group.
-    // Fix: use Redis to track the combined totals across all groups
+    // Fix: use in-memory cache to track the combined totals across all groups
     // for the same destination, so the $50 threshold applies to the full order.
     let combinedRtsTotal = rtsSubtotal;
     let combinedPoTotal = preorderSubtotal;
@@ -730,12 +745,12 @@ app.post('/rates', async (req, res) => {
     if (rtsSubtotal > 0 || preorderSubtotal > 0) {
       try {
         const groupId = crypto.randomUUID();
-        // Store both RTS and PO subtotals for this group
+        // Store both RTS and PO subtotals for this group (30s TTL)
         if (rtsSubtotal > 0) {
-          await redis.set(`${destKey}:rts:${groupId}`, rtsSubtotal.toString(), { EX: 30 });
+          cacheSet(`${destKey}:rts:${groupId}`, rtsSubtotal, 30);
         }
         if (preorderSubtotal > 0) {
-          await redis.set(`${destKey}:po:${groupId}`, preorderSubtotal.toString(), { EX: 30 });
+          cacheSet(`${destKey}:po:${groupId}`, preorderSubtotal, 30);
         }
 
         // Delay to let concurrent delivery group requests land.
@@ -745,20 +760,18 @@ app.post('/rates', async (req, res) => {
 
         // Sum all RTS subtotals for this destination
         if (rtsSubtotal > 0) {
-          const rtsKeys = await redis.keys(`${destKey}:rts:*`);
+          const rtsKeys = cacheKeys(`${destKey}:rts:*`);
           if (rtsKeys.length > 1) {
-            const values = await redis.mGet(rtsKeys);
-            combinedRtsTotal = values.reduce((sum, v) => sum + (parseInt(v) || 0), 0);
+            combinedRtsTotal = rtsKeys.reduce((sum, k) => sum + (cacheGet(k) || 0), 0);
             console.log(`Cross-location RTS: ${rtsKeys.length} groups, combined $${combinedRtsTotal/100}`);
           }
         }
 
         // Sum all PO subtotals for this destination
         if (preorderSubtotal > 0) {
-          const poKeys = await redis.keys(`${destKey}:po:*`);
+          const poKeys = cacheKeys(`${destKey}:po:*`);
           if (poKeys.length > 1) {
-            const values = await redis.mGet(poKeys);
-            combinedPoTotal = values.reduce((sum, v) => sum + (parseInt(v) || 0), 0);
+            combinedPoTotal = poKeys.reduce((sum, k) => sum + (cacheGet(k) || 0), 0);
             console.log(`Cross-location PO: ${poKeys.length} groups, combined $${combinedPoTotal/100}`);
           }
         }
@@ -826,24 +839,14 @@ app.post('/webhook/product-update', express.raw({ type: 'application/json' }), a
     // Invalidate cache for all variants of this product
     if (product.variants) {
       for (const variant of product.variants) {
-        const cacheKey = `preproduct_variant_${variant.id}`;
-        try {
-          await redis.del(cacheKey);
-        } catch (error) {
-          console.warn('Cache deletion error:', error);
-        }
+        cacheDel(`preproduct_variant_${variant.id}`);
       }
       console.log(`Cache invalidated for product ${product.id} with ${product.variants.length} variants`);
     }
-    
-    // NEW: Invalidate product cache for mystery box detection
-    const productCacheKey = `product_data_${product.id}`;
-    try {
-      await redis.del(productCacheKey);
-      console.log(`Product cache invalidated for product ${product.id}`);
-    } catch (error) {
-      console.warn('Product cache deletion error:', error);
-    }
+
+    // Invalidate product cache for mystery box detection
+    cacheDel(`product_data_${product.id}`);
+    console.log(`Product cache invalidated for product ${product.id}`);
     
     res.status(200).send('OK');
     
@@ -874,20 +877,15 @@ app.post('/config', (req, res) => {
 // Cache stats endpoint
 app.get('/cache/stats', async (req, res) => {
   try {
-    if (!redis.isReady) {
-      return res.status(503).json({ error: 'Redis not connected' });
-    }
-    
-    const info = await redis.info('memory');
-    const variantKeys = await redis.keys('preproduct_variant_*');
-    const productKeys = await redis.keys('product_data_*');
-    
+    const variantKeys = cacheKeys('preproduct_variant_*');
+    const productKeys = cacheKeys('product_data_*');
+
     res.json({
-      redis_connected: redis.isReady,
+      cache_type: 'in-memory',
+      total_entries: cache.size,
       cached_variants: variantKeys.length,
       cached_products: productKeys.length,
       cache_prefixes: ['preproduct_variant_', 'product_data_'],
-      memory_info: info,
       batchy_api: process.env.BATCHY_API_KEY ? 'configured' : 'missing'
     });
   } catch (error) {
@@ -898,19 +896,15 @@ app.get('/cache/stats', async (req, res) => {
 // Clear cache endpoint
 app.post('/cache/clear', async (req, res) => {
   try {
-    if (!redis.isReady) {
-      return res.status(503).json({ error: 'Redis not connected' });
-    }
-    
-    const variantKeys = await redis.keys('preproduct_variant_*');
-    const productKeys = await redis.keys('product_data_*');
+    const variantKeys = cacheKeys('preproduct_variant_*');
+    const productKeys = cacheKeys('product_data_*');
     const allKeys = [...variantKeys, ...productKeys];
-    
-    if (allKeys.length > 0) {
-      await redis.del(allKeys);
+
+    for (const key of allKeys) {
+      cacheDel(key);
     }
-    
-    res.json({ 
+
+    res.json({
       cleared: allKeys.length,
       variants: variantKeys.length,
       products: productKeys.length
@@ -1016,19 +1010,13 @@ app.use((req, res) => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
+process.on('SIGINT', () => {
   console.log('Shutting down gracefully...');
-  if (redis.isReady) {
-    await redis.disconnect();
-  }
   process.exit(0);
 });
 
-process.on('SIGTERM', async () => {
+process.on('SIGTERM', () => {
   console.log('Received SIGTERM, shutting down gracefully...');
-  if (redis.isReady) {
-    await redis.disconnect();
-  }
   process.exit(0);
 });
 
