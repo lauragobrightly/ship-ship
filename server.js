@@ -140,8 +140,8 @@ const appConfig = {
   currency: "USD"
 };
 
-// Cache TTL (24 hours)
-const CACHE_TTL = 24 * 60 * 60;
+// Cache TTL (15 minutes — short enough to pick up Batchy status changes quickly)
+const CACHE_TTL = 15 * 60;
 
 // Cache TTL for product data (1 hour)
 const PRODUCT_CACHE_TTL = 3600;
