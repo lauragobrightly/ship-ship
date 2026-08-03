@@ -37,7 +37,7 @@ jest.mock('redis', () => ({
 global.fetch = jest.fn();
 
 describe('Shipping Rates API', () => {
-  const mockRateRequest = (items) => ({
+  const mockRateRequest = (items, destOverride = {}) => ({
     rate: {
       origin: {
         country: "US",
@@ -48,8 +48,9 @@ describe('Shipping Rates API', () => {
       destination: {
         country: "US",
         postal_code: "10001",
-        province: "NY", 
-        city: "New York"
+        province: "NY",
+        city: "New York",
+        ...destOverride
       },
       items,
       currency: "USD",
@@ -178,16 +179,53 @@ describe('Shipping Rates API', () => {
         .expect(200)
     ]);
 
-    // At least one should detect the combined total and return free
+    // BOTH must be free. This used to assert only `toContain("0")` — at least one
+    // free — which passes when one group is charged $5, i.e. it green-lit the exact
+    // overcharge a customer reported on 2026-08-03.
     const prices = [
       response1.body.rates[0]?.total_price,
       response2.body.rates[0]?.total_price
     ];
-
-    // The second request (arriving after the 200ms delay) should see combined total
-    // Due to timing, at minimum the later response should be free
     console.log('Cross-location prices:', prices);
-    expect(prices).toContain("0");
+    expect(prices).toEqual(["0", "0"]);
+  });
+
+  test('Cross-location split arriving 2s apart: $38 + $38 → both Free', async () => {
+    // The real failure mode. Shopify does not guarantee that delivery-group
+    // callbacks arrive together; when they were more than 750ms apart the first
+    // one used to wake alone and charge $5. The first request must now wait for
+    // its sibling instead of deciding on its own subtotal.
+    const mkItem = (name, productId) => ([{
+      name,
+      sku: name.toUpperCase().replace(/\s+/g, '-'),
+      quantity: 1,
+      grams: 200,
+      price: 3800,
+      vendor: "Wildwoven",
+      requires_shipping: true,
+      taxable: true,
+      fulfillment_service: "manual",
+      product_id: productId,
+      variant_id: 789012
+    }]);
+
+    const dest = { postal_code: "28104", address1: "77 Skew Street" };
+
+    const first = request(app)
+      .post('/rates')
+      .send(mockRateRequest(mkItem("Skew Romper", 333333), dest))
+      .expect(200);
+
+    // Sibling group lands 2s later — well past the old 750ms sleep.
+    const second = new Promise(resolve => setTimeout(resolve, 2000)).then(() =>
+      request(app)
+        .post('/rates')
+        .send(mockRateRequest(mkItem("Skew Pajamas", 444444), dest))
+        .expect(200)
+    );
+
+    const [r1, r2] = await Promise.all([first, second]);
+    expect([r1.body.rates[0]?.total_price, r2.body.rates[0]?.total_price]).toEqual(["0", "0"]);
   });
 
   test('Single location $30 → still $5 (no cross-location boost)', async () => {

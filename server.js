@@ -143,6 +143,21 @@ const appConfig = {
 // Cache TTL (15 minutes — short enough to pick up Batchy status changes quickly)
 const CACHE_TTL = 15 * 60;
 
+// Cross-location delivery-group combining. Shopify calls /rates once per delivery
+// group, each seeing only its own items, so a group has to wait to learn the order's
+// real total. Shopify's carrier-service timeout is ~10s; 3s leaves ample headroom
+// while covering the multi-second skew observed between real callbacks.
+//
+// Only a group that is UNDER the threshold on its own ever waits — a group that
+// already clears it returns immediately, and a group whose sibling has already
+// registered returns as soon as it reads the combined total. So this window is the
+// worst-case added latency for sub-threshold carts (which get charged either way),
+// not a blanket delay on checkout. Tunable without a redeploy if that trade needs
+// adjusting.
+const CROSS_GROUP_WINDOW_MS = Number(process.env.CROSS_GROUP_WINDOW_MS || 3000);
+const CROSS_GROUP_POLL_MS = 100;
+const CROSS_GROUP_TTL_SECONDS = 30;
+
 // Cache TTL for product data (1 hour)
 const PRODUCT_CACHE_TTL = 3600;
 
@@ -747,33 +762,60 @@ app.post('/rates', async (req, res) => {
         const groupId = crypto.randomUUID();
         // Store both RTS and PO subtotals for this group (30s TTL)
         if (rtsSubtotal > 0) {
-          cacheSet(`${destKey}:rts:${groupId}`, rtsSubtotal, 30);
+          cacheSet(`${destKey}:rts:${groupId}`, rtsSubtotal, CROSS_GROUP_TTL_SECONDS);
         }
         if (preorderSubtotal > 0) {
-          cacheSet(`${destKey}:po:${groupId}`, preorderSubtotal, 30);
+          cacheSet(`${destKey}:po:${groupId}`, preorderSubtotal, CROSS_GROUP_TTL_SECONDS);
         }
 
-        // Delay to let concurrent delivery group requests land.
-        // Shopify sends all delivery group requests near-simultaneously,
-        // but network latency means they arrive ~100-500ms apart.
-        await new Promise(resolve => setTimeout(resolve, 750));
+        // Wait for sibling delivery groups to register, then combine.
+        //
+        // This used to be a single fixed 750ms sleep, which assumed Shopify issues
+        // every delivery group's callback near-simultaneously. It does not always:
+        // when the two callbacks arrive more than 750ms apart, the FIRST one wakes
+        // up alone, sees only its own subtotal, and charges the fee — even though
+        // the customer's full order clears the threshold. That is exactly what a
+        // customer screenshotted on 2026-08-03 ($76 order split across two
+        // warehouses: one group $0, the other $5, total $5) and it had been
+        // happening to real orders for months.
+        //
+        // Instead of sleeping a fixed amount and hoping, poll until the combined
+        // total clears the threshold or the window expires. Two consequences:
+        //   - a group whose OWN subtotal already clears never waits at all
+        //   - a group that is under on its own waits for its siblings, and returns
+        //     the moment they land rather than at a fixed deadline
+        const deadline = Date.now() + CROSS_GROUP_WINDOW_MS;
+        const sumKeys = (bucket) => {
+          const keys = cacheKeys(`${destKey}:${bucket}:*`);
+          return { count: keys.length, total: keys.reduce((sum, k) => sum + (cacheGet(k) || 0), 0) };
+        };
+        // A bucket is settled once it clears the threshold — more siblings can only
+        // push it higher, so there is nothing left to wait for.
+        const settled = () =>
+          (rtsSubtotal === 0 || combinedRtsTotal >= appConfig.threshold) &&
+          (preorderSubtotal === 0 || combinedPoTotal >= appConfig.threshold);
 
-        // Sum all RTS subtotals for this destination
-        if (rtsSubtotal > 0) {
-          const rtsKeys = cacheKeys(`${destKey}:rts:*`);
-          if (rtsKeys.length > 1) {
-            combinedRtsTotal = rtsKeys.reduce((sum, k) => sum + (cacheGet(k) || 0), 0);
-            console.log(`Cross-location RTS: ${rtsKeys.length} groups, combined $${combinedRtsTotal/100}`);
+        let polls = 0;
+        for (;;) {
+          if (rtsSubtotal > 0) {
+            const { count, total } = sumKeys('rts');
+            if (count > 1) combinedRtsTotal = total;
           }
+          if (preorderSubtotal > 0) {
+            const { count, total } = sumKeys('po');
+            if (count > 1) combinedPoTotal = total;
+          }
+          if (settled() || Date.now() >= deadline) break;
+          polls++;
+          await new Promise(resolve => setTimeout(resolve, CROSS_GROUP_POLL_MS));
         }
 
-        // Sum all PO subtotals for this destination
-        if (preorderSubtotal > 0) {
-          const poKeys = cacheKeys(`${destKey}:po:*`);
-          if (poKeys.length > 1) {
-            combinedPoTotal = poKeys.reduce((sum, k) => sum + (cacheGet(k) || 0), 0);
-            console.log(`Cross-location PO: ${poKeys.length} groups, combined $${combinedPoTotal/100}`);
-          }
+        if (combinedRtsTotal !== rtsSubtotal || combinedPoTotal !== preorderSubtotal) {
+          console.log(`Cross-location combine after ${polls} poll(s): RTS $${combinedRtsTotal/100}, PO $${combinedPoTotal/100}`);
+        } else if (!settled()) {
+          console.warn(`Cross-location WINDOW EXPIRED after ${CROSS_GROUP_WINDOW_MS}ms with no sibling group — `
+            + `charging on this group alone (RTS $${rtsSubtotal/100}, PO $${preorderSubtotal/100}). `
+            + `If this order was split, the customer is being overcharged.`);
         }
       } catch (e) {
         console.log('Cross-location tracking error (non-fatal):', e.message);
