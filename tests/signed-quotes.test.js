@@ -160,6 +160,65 @@ describe('signed Hydrogen pool quotes', () => {
     expect(preorderResponse.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
   });
 
+  test.each([
+    ['ready $49.99', 4999, null, {RTS_STD: '500'}],
+    ['ready $50.00', 5000, null, {RTS_STD: '0'}],
+    ['preorder $49.99', null, 4999, {PO_STD: '500'}],
+    ['preorder $50.00', null, 5000, {PO_STD: '0'}],
+    ['ready $30 + preorder $60', 3000, 6000, {RTS_STD: '500', PO_STD: '0'}],
+    ['ready $60 + preorder $30', 6000, 3000, {RTS_STD: '0', PO_STD: '500'}],
+    ['ready $30 + preorder $30', 3000, 3000, {RTS_STD: '500', PO_STD: '500'}],
+    ['ready $60 + preorder $60', 6000, 6000, {RTS_STD: '0', PO_STD: '0'}],
+  ])('%s returns the exact independent standard-shipping fees', async (
+    name,
+    readyCents,
+    preorderCents,
+    expected,
+  ) => {
+    const cartCents = (readyCents ?? 0) + (preorderCents ?? 0);
+    const callbacks = [];
+
+    if (readyCents !== null) {
+      const ready = item({
+        productId: 801,
+        variantId: 801,
+        price: readyCents,
+        poolCents: readyCents,
+        cartCents,
+        quoteId: `matrix-${name}`,
+        anchor: true,
+      });
+      callbacks.push(
+        request(app).post('/rates').send(payload([ready], cartCents, `Matrix ${name} ready`)).expect(200),
+      );
+    }
+
+    if (preorderCents !== null) {
+      const preorder = item({
+        productId: 802,
+        variantId: 802,
+        price: preorderCents,
+        bucket: 'preorder',
+        poolCents: preorderCents,
+        cartCents,
+        quoteId: `matrix-${name}`,
+        anchor: true,
+      });
+      callbacks.push(
+        request(app).post('/rates').send(payload([preorder], cartCents, `Matrix ${name} preorder`)).expect(200),
+      );
+    }
+
+    const responses = await Promise.all(callbacks);
+    const actual = Object.fromEntries(
+      responses.map((response) => [
+        response.body.rates[0].service_code,
+        response.body.rates[0].total_price,
+      ]),
+    );
+    expect(actual).toEqual(expected);
+  });
+
   test('accepts Shopify object-form properties', () => {
     const quotedItem = item({
       productId: 501, variantId: 501, price: 5000,
