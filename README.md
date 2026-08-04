@@ -4,12 +4,22 @@ Wildwoven's Shopify carrier service for ready-to-ship and preorder rates.
 
 ## Shipping rules
 
-- Ready-to-ship groups use Shopify's full `order_totals.subtotal_price` for the $50 free-shipping threshold. Split fulfillment locations do not change qualification.
-- Preorder groups qualify separately and use Batchy as the variant-status source.
-- Domestic groups under their applicable threshold cost $5.
+- Hydrogen signs the post-discount ready-stock and preorder pool totals before
+  checkout. Every line carries its pool total, and one line per pool is the fee
+  anchor.
+- Ship Ship Hooray verifies those signatures with the shared Batchy credential.
+  Pools at or above $50 are free. Below $50, only the group containing the
+  signed anchor costs $5, even when Shopify splits the pool across locations.
+- Ready-stock and preorder pools always qualify independently. The virtual
+  Pre-Order Warehouse remains the fulfillment boundary.
+- Missing, stale, conflicting, or modified signed data fails closed at $5.
 - International orders defer to Shopify's native rates.
 
-Shopify can call `/rates` once per fulfillment group. Since November 2025, every callback includes the full cart subtotal in `order_totals`. The service uses that value directly for in-stock items instead of trying to reconstruct the cart from callbacks that can arrive seconds apart.
+Shopify can call `/rates` once per fulfillment group. A callback cannot see its
+sibling groups, so it cannot reconstruct either stock pool reliably. The signed
+quote supplies that missing cart-wide context without waiting for sibling
+callbacks. Legacy carts retain the prior conservative fallback until they pass
+through Hydrogen's `/checkout` bridge.
 
 ## Production
 
@@ -29,10 +39,16 @@ Shopify can call `/rates` once per fulfillment group. Since November 2025, every
 - `BATCHY_API_KEY`
 - `BATCHY_URL`
 
-`CROSS_GROUP_WINDOW_MS` is optional. It controls the legacy/preorder sibling-callback fallback and defaults to 3000 ms.
+`BATCHY_API_KEY` must match Hydrogen's production value because it also signs
+and verifies the private shipping quote. `CROSS_GROUP_WINDOW_MS` is optional and
+applies only to legacy carts without signed data.
 
 ## Testing
 
 ```bash
 npm test
 ```
+
+The suite includes the reported two-location $76 checkout, independent mixed
+pools, tamper/staleness guards, object-form properties, and 441 ready/preorder
+threshold × location combinations.

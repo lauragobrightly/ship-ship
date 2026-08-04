@@ -36,6 +36,7 @@ function cacheSet(key, value, ttlSeconds) {
     clearTimeout(existing.timer);
   }
   const timer = setTimeout(() => cache.delete(key), ttlSeconds * 1000);
+  timer.unref?.();
   cache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000, timer });
 }
 
@@ -327,6 +328,144 @@ async function getVariantPreOrderStatus(variantIds) {
   return results;
 }
 
+function itemProperty(item, key) {
+  const properties = item?.properties;
+  if (Array.isArray(properties)) {
+    const match = properties.find((property) =>
+      (property?.key ?? property?.name) === key
+    );
+    return match?.value ?? null;
+  }
+  if (properties && typeof properties === 'object') {
+    return properties[key] ?? null;
+  }
+  return null;
+}
+
+async function classifyPreOrderItems(items) {
+  const result = new Map();
+  const unresolvedVariantIds = [];
+
+  for (const item of items) {
+    const variantId = item.variant_id.toString();
+    if (itemProperty(item, '_shipping_bucket') === 'preorder') {
+      result.set(variantId, true);
+    } else {
+      unresolvedVariantIds.push(variantId);
+    }
+  }
+
+  if (unresolvedVariantIds.length > 0) {
+    const fetched = await getVariantPreOrderStatus([...new Set(unresolvedVariantIds)]);
+    for (const variantId of unresolvedVariantIds) {
+      // A duplicate unstamped line must never overwrite an affirmative marker
+      // carried by another line for the same variant.
+      if (result.get(variantId) !== true) {
+        result.set(variantId, fetched.get(variantId) || false);
+      }
+    }
+  }
+
+  return result;
+}
+
+function parseUnsignedInteger(value) {
+  const text = String(value ?? '');
+  if (!/^\d+$/.test(text)) return null;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function quoteSignaturePayload({
+  quoteId,
+  bucket,
+  poolCents,
+  cartCents,
+  currency,
+  productId,
+  variantId,
+  quantity,
+  anchor,
+}) {
+  return [
+    '1', quoteId, bucket, poolCents, cartCents, currency,
+    productId, variantId, quantity, anchor ? '1' : '0',
+  ].join('|');
+}
+
+function signaturesMatch(actual, expected) {
+  if (!/^[a-f0-9]{64}$/i.test(String(actual ?? ''))) return false;
+  const actualBuffer = Buffer.from(String(actual), 'hex');
+  const expectedBuffer = Buffer.from(expected, 'hex');
+  return actualBuffer.length === expectedBuffer.length &&
+    crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+/**
+ * Verify Hydrogen's signed whole-pool quote for one carrier delivery group.
+ * Returns null on any ambiguity so the caller falls back to a $5 group rate.
+ */
+export function verifySignedShippingQuote(items, bucket, rate, secret = process.env.BATCHY_API_KEY) {
+  if (!secret || !Array.isArray(items) || items.length === 0) return null;
+
+  let common = null;
+  let anchorCount = 0;
+
+  for (const item of items) {
+    const version = String(itemProperty(item, '_ww_ship_v') ?? '');
+    const quoteId = String(itemProperty(item, '_ww_ship_quote') ?? '');
+    const quotedBucket = String(itemProperty(item, '_ww_ship_pool') ?? '');
+    const poolCents = parseUnsignedInteger(itemProperty(item, '_ww_ship_pool_cents'));
+    const cartCents = parseUnsignedInteger(itemProperty(item, '_ww_ship_cart_cents'));
+    const currency = String(itemProperty(item, '_ww_ship_currency') ?? '').toUpperCase();
+    const anchorValue = String(itemProperty(item, '_ww_ship_anchor') ?? '');
+    const signature = itemProperty(item, '_ww_ship_sig');
+    const productId = String(item?.product_id ?? '');
+    const variantId = String(item?.variant_id ?? '');
+    const quantity = parseUnsignedInteger(item?.quantity);
+
+    if (
+      version !== '1' || !quoteId || quotedBucket !== bucket ||
+      poolCents === null || cartCents === null || !currency ||
+      !['0', '1'].includes(anchorValue) || !productId || !variantId ||
+      quantity === null || quantity < 1
+    ) return null;
+
+    const anchor = anchorValue === '1';
+    const expectedSignature = crypto
+      .createHmac('sha256', secret)
+      .update(quoteSignaturePayload({
+        quoteId, bucket, poolCents, cartCents, currency,
+        productId, variantId, quantity, anchor,
+      }))
+      .digest('hex');
+    if (!signaturesMatch(signature, expectedSignature)) return null;
+
+    const itemCommon = {quoteId, bucket, poolCents, cartCents, currency};
+    if (common && JSON.stringify(common) !== JSON.stringify(itemCommon)) return null;
+    common = itemCommon;
+    if (anchor) anchorCount++;
+  }
+
+  if (anchorCount > 1) return null;
+  const orderSubtotal = parseUnsignedInteger(rate?.order_totals?.subtotal_price);
+  const rateCurrency = String(rate?.currency ?? '').toUpperCase();
+  if (orderSubtotal === null || orderSubtotal !== common.cartCents) return null;
+  if (rateCurrency && rateCurrency !== common.currency) return null;
+
+  return {...common, hasAnchor: anchorCount === 1};
+}
+
+export function priceForSignedPool(quote, threshold = appConfig.threshold) {
+  if (!quote) return null;
+  if (quote.poolCents >= threshold) return 0;
+  return quote.hasAnchor ? appConfig.feeUnderThreshold : 0;
+}
+
+function hasShippingQuoteMetadata(items) {
+  return items.some((item) => itemProperty(item, '_ww_ship_v') !== null);
+}
+
 // Routes
 
 // OAuth initiation route (optional - for manual installs)
@@ -397,7 +536,6 @@ app.get('/auth/callback', async (req, res) => {
     const accessToken = tokenData.access_token;
     
     console.log(`✅ OAuth successful for shop: ${shop}`);
-    console.log(`🔑 Access token received: ${accessToken.substring(0, 10)}...`);
     
     // Now install the carrier service and webhooks
     try {
@@ -463,8 +601,6 @@ app.get('/auth/callback', async (req, res) => {
           h1 { color: #2c5aa0; margin-bottom: 20px; }
           .success { background: #d4edda; color: #155724; padding: 15px; 
                     border-radius: 4px; margin: 20px 0; }
-          .token-box { background: #f8f9fa; padding: 15px; border-radius: 4px; 
-                      font-family: monospace; word-break: break-all; margin: 20px 0; }
           .next-steps { background: #e7f3ff; padding: 20px; border-radius: 4px; }
           a { color: #2c5aa0; text-decoration: none; }
           a:hover { text-decoration: underline; }
@@ -481,16 +617,9 @@ app.get('/auth/callback', async (req, res) => {
             ✅ Ready to calculate shipping rates!
           </div>
           
-          <h3>🔑 Access Token</h3>
-          <p>Add this access token to your Railway environment variables:</p>
-          <div class="token-box">
-            SHOPIFY_ACCESS_TOKEN=${accessToken}
-          </div>
-          
           <div class="next-steps">
             <h3>📋 Next Steps:</h3>
             <ol>
-              <li><strong>Add the access token</strong> to your Railway environment variables</li>
               <li><strong>Test the app:</strong> <a href="${process.env.APP_DOMAIN}" target="_blank">Visit Admin Interface</a></li>
               <li><strong>Test shipping rates:</strong> Add items to cart and go to checkout</li>
               <li><strong>Configure settings:</strong> Adjust thresholds and labels in admin</li>
@@ -720,15 +849,15 @@ app.post('/rates', async (req, res) => {
       // If no mystery box items, continue with normal RTS/PO logic below
     }
     
-    // Get variant IDs
-    const variantIds = rate.items.map(item => item.variant_id.toString());
-
-    // Fetch pre-order status for all variants from PreProduct
-    const variantStatuses = await getVariantPreOrderStatus(variantIds);
+    // Prefer Hydrogen's affirmative preorder marker, then fall back to Batchy
+    // for accelerated checkouts and legacy carts.
+    const variantStatuses = await classifyPreOrderItems(rate.items);
 
     // Calculate subtotals for THIS delivery group
     let rtsSubtotal = 0;
     let preorderSubtotal = 0;
+    const rtsItems = [];
+    const preorderItems = [];
 
     for (const item of rate.items) {
       const variantId = item.variant_id.toString();
@@ -737,10 +866,23 @@ app.post('/rates', async (req, res) => {
 
       if (isPreOrder) {
         preorderSubtotal += extended;
+        preorderItems.push(item);
       } else {
         rtsSubtotal += extended;
+        rtsItems.push(item);
       }
     }
+
+    const rtsQuote = rtsItems.length > 0
+      ? verifySignedShippingQuote(rtsItems, 'ready-stock', rate)
+      : null;
+    const preorderQuote = preorderItems.length > 0
+      ? verifySignedShippingQuote(preorderItems, 'preorder', rate)
+      : null;
+    const invalidRtsQuote = rtsItems.length > 0 &&
+      hasShippingQuoteMetadata(rtsItems) && !rtsQuote;
+    const invalidPreorderQuote = preorderItems.length > 0 &&
+      hasShippingQuoteMetadata(preorderItems) && !preorderQuote;
 
     // Shopify sends one /rates request per fulfillment group, but order_totals
     // contains the full cart subtotal in every callback. Use that authoritative
@@ -765,10 +907,10 @@ app.post('/rates', async (req, res) => {
         // cross-group combiner only as a fallback for malformed/legacy payloads.
         // Pre-orders still qualify independently, so their group totals continue
         // to use the combiner.
-        if (rtsSubtotal > 0 && !hasShopifyOrderSubtotal) {
+        if (rtsSubtotal > 0 && !rtsQuote && !invalidRtsQuote && !hasShopifyOrderSubtotal) {
           cacheSet(`${destKey}:rts:${groupId}`, rtsSubtotal, CROSS_GROUP_TTL_SECONDS);
         }
-        if (preorderSubtotal > 0) {
+        if (preorderSubtotal > 0 && !preorderQuote && !invalidPreorderQuote) {
           cacheSet(`${destKey}:po:${groupId}`, preorderSubtotal, CROSS_GROUP_TTL_SECONDS);
         }
 
@@ -796,16 +938,16 @@ app.post('/rates', async (req, res) => {
         // A bucket is settled once it clears the threshold — more siblings can only
         // push it higher, so there is nothing left to wait for.
         const settled = () =>
-          (rtsSubtotal === 0 || hasShopifyOrderSubtotal || combinedRtsTotal >= appConfig.threshold) &&
-          (preorderSubtotal === 0 || combinedPoTotal >= appConfig.threshold);
+          (rtsSubtotal === 0 || rtsQuote || invalidRtsQuote || hasShopifyOrderSubtotal || combinedRtsTotal >= appConfig.threshold) &&
+          (preorderSubtotal === 0 || preorderQuote || invalidPreorderQuote || combinedPoTotal >= appConfig.threshold);
 
         let polls = 0;
         for (;;) {
-          if (rtsSubtotal > 0 && !hasShopifyOrderSubtotal) {
+          if (rtsSubtotal > 0 && !rtsQuote && !invalidRtsQuote && !hasShopifyOrderSubtotal) {
             const { count, total } = sumKeys('rts');
             if (count > 1) combinedRtsTotal = total;
           }
-          if (preorderSubtotal > 0) {
+          if (preorderSubtotal > 0 && !preorderQuote && !invalidPreorderQuote) {
             const { count, total } = sumKeys('po');
             if (count > 1) combinedPoTotal = total;
           }
@@ -832,7 +974,9 @@ app.post('/rates', async (req, res) => {
     // Emit RTS rate if there are RTS items
     // Use combinedRtsTotal for threshold check (cross-location aware)
     if (rtsSubtotal > 0) {
-      const rtsPrice = combinedRtsTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold;
+      const signedPrice = priceForSignedPool(rtsQuote);
+      const rtsPrice = invalidRtsQuote ? appConfig.feeUnderThreshold : signedPrice ??
+        (combinedRtsTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold);
       rates.push({
         service_name: appConfig.labels.rts,
         service_code: "RTS_STD",
@@ -845,7 +989,9 @@ app.post('/rates', async (req, res) => {
     // Emit Pre-Order rate if there are PO items
     // Use combinedPoTotal for threshold check (cross-location aware)
     if (preorderSubtotal > 0) {
-      const poPrice = combinedPoTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold;
+      const signedPrice = priceForSignedPool(preorderQuote);
+      const poPrice = invalidPreorderQuote ? appConfig.feeUnderThreshold : signedPrice ??
+        (combinedPoTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold);
       rates.push({
         service_name: appConfig.labels.po,
         service_code: "PO_STD",
@@ -860,7 +1006,8 @@ app.post('/rates', async (req, res) => {
     const rtsQualificationSource = hasShopifyOrderSubtotal
       ? `Shopify order subtotal: $${combinedRtsTotal/100}`
       : `legacy combined subtotal: $${combinedRtsTotal/100}`;
-    console.log(`RTS subtotal: $${rtsSubtotal/100} (${rtsQualificationSource}), PO subtotal: $${preorderSubtotal/100}`);
+    const quoteSource = rtsQuote || preorderQuote ? 'signed Hydrogen pool quote' : rtsQualificationSource;
+    console.log(`RTS subtotal: $${rtsSubtotal/100}, PO subtotal: $${preorderSubtotal/100} (${quoteSource})`);
     
     res.json({ rates });
     
@@ -1069,12 +1216,14 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-app.listen(port, () => {
-  console.log(`Ship Ship Hooray running on port ${port}`);
-  console.log(`Environment: ${process.env.NODE_ENV}`);
-  console.log(`App domain: ${process.env.APP_DOMAIN}`);
-  console.log(`Batchy API: ${process.env.BATCHY_API_KEY ? 'Configured' : 'Missing'}`);
-  console.log(`Batchy URL: ${process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(port, () => {
+    console.log(`Ship Ship Hooray running on port ${port}`);
+    console.log(`Environment: ${process.env.NODE_ENV}`);
+    console.log(`App domain: ${process.env.APP_DOMAIN}`);
+    console.log(`Batchy API: ${process.env.BATCHY_API_KEY ? 'Configured' : 'Missing'}`);
+    console.log(`Batchy URL: ${process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'}`);
+  });
+}
 
 export default app;
