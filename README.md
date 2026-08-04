@@ -4,12 +4,13 @@ Wildwoven's Shopify carrier service for ready-to-ship and preorder rates.
 
 ## Shipping rules
 
-- Ready-to-ship groups use Shopify's full `order_totals.subtotal_price` for the $50 free-shipping threshold. Split fulfillment locations do not change qualification.
-- Preorder groups qualify separately and use Batchy as the variant-status source.
-- Domestic groups under their applicable threshold cost $5.
+- Ready-stock and preorder merchandise have independent $50 thresholds.
+- Each non-qualifying stock pool costs $5 once, even when Shopify splits it across fulfillment locations.
+- Hydrogen stamps preorder lines with `_shipping_bucket=preorder`; Batchy is the fallback status source for carts that lack the marker.
+- The carrier callback returns a safe per-group rate. The checkout-native Function in `extensions/split-shipping-discount` performs the authoritative cross-group adjustment atomically.
 - International orders defer to Shopify's native rates.
 
-Shopify can call `/rates` once per fulfillment group. Since November 2025, every callback includes the full cart subtotal in `order_totals`. The service uses that value directly for in-stock items instead of trying to reconstruct the cart from callbacks that can arrive seconds apart.
+Shopify can call `/rates` once per delivery group. The carrier therefore always returns the $5 base standard rate for each physical delivery group. The Discount Function sees every group and the merchandise line subtotals in one invocation, then applies the two $50 thresholds and removes duplicate location fees. The Function can make a rate free; it never needs to reconstruct a fee the carrier already removed.
 
 ## Production
 
@@ -29,10 +30,11 @@ Shopify can call `/rates` once per fulfillment group. Since November 2025, every
 - `BATCHY_API_KEY`
 - `BATCHY_URL`
 
-`CROSS_GROUP_WINDOW_MS` is optional. It controls the legacy/preorder sibling-callback fallback and defaults to 3000 ms.
-
 ## Testing
 
 ```bash
 npm test
+npm run test:function
 ```
+
+The Function must be linked to the existing Partner app before `npm run build` can compile it. See `extensions/split-shipping-discount/README.md`.

@@ -1,0 +1,17 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Wildwoven split shipping"
+handle = "wildwoven-split-shipping"
+uid = "9c6c3d48-636b-4b1a-a023-4f370c62aeb1"
+type = "function"
+description = "Applies independent $50 free-shipping thresholds to ready-stock and preorder delivery groups."
+
+[[extensions.targeting]]
+target = "cart.delivery-options.discounts.generate.run"
+input_query = "src/cart_delivery_options_discounts_generate_run.graphql"
+export = "cart-delivery-options-discounts-generate-run"
+
+[extensions.build]
+command = ""
+path = "dist/function.wasm"

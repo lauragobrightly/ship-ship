@@ -1,0 +1,62 @@
+{
+  "presentmentCurrencyRate": "1.0",
+  "cart": {
+    "deliveryGroups": [
+      {
+        "id": "gid://shopify/CartDeliveryGroup/ready-a",
+        "cartLines": [
+          {
+            "id": "gid://shopify/CartLine/ready-a",
+            "quantity": 1,
+            "shippingBucket": null,
+            "cost": {
+              "totalAmount": {
+                "amount": "38.00"
+              }
+            }
+          }
+        ],
+        "deliveryOptions": [
+          {
+            "handle": "ready-a-rate",
+            "code": "RTS_STD",
+            "title": "Ships Now (In-Stock)",
+            "cost": {
+              "amount": "5.00"
+            }
+          }
+        ]
+      },
+      {
+        "id": "gid://shopify/CartDeliveryGroup/ready-b",
+        "cartLines": [
+          {
+            "id": "gid://shopify/CartLine/ready-b",
+            "quantity": 1,
+            "shippingBucket": null,
+            "cost": {
+              "totalAmount": {
+                "amount": "38.00"
+              }
+            }
+          }
+        ],
+        "deliveryOptions": [
+          {
+            "handle": "ready-b-rate",
+            "code": "RTS_STD",
+            "title": "Ships Now (In-Stock)",
+            "cost": {
+              "amount": "5.00"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "discount": {
+    "discountClasses": [
+      "SHIPPING"
+    ]
+  }
+}

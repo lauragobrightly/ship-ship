@@ -36,6 +36,9 @@ function cacheSet(key, value, ttlSeconds) {
     clearTimeout(existing.timer);
   }
   const timer = setTimeout(() => cache.delete(key), ttlSeconds * 1000);
+  // Cache expiry must not keep a short-lived process (tests, one-off checks,
+  // graceful deploy shutdowns) alive on its own.
+  timer.unref?.();
   cache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000, timer });
 }
 
@@ -142,17 +145,6 @@ const appConfig = {
 
 // Cache TTL (15 minutes — short enough to pick up Batchy status changes quickly)
 const CACHE_TTL = 15 * 60;
-
-// Legacy cross-location delivery-group combining. Current Shopify callbacks include
-// order_totals, which is authoritative for ready-to-ship qualification. This window
-// now applies only to pre-order totals and as an RTS fallback if order_totals is
-// absent or malformed.
-//
-// Only an unsettled legacy/pre-order group waits. Current in-stock requests with a
-// valid Shopify order subtotal return immediately.
-const CROSS_GROUP_WINDOW_MS = Number(process.env.CROSS_GROUP_WINDOW_MS || 3000);
-const CROSS_GROUP_POLL_MS = 100;
-const CROSS_GROUP_TTL_SECONDS = 30;
 
 // Cache TTL for product data (1 hour)
 const PRODUCT_CACHE_TTL = 3600;
@@ -327,6 +319,51 @@ async function getVariantPreOrderStatus(variantIds) {
   return results;
 }
 
+function itemProperty(item, key) {
+  const properties = item?.properties;
+  if (Array.isArray(properties)) {
+    const match = properties.find((property) =>
+      (property?.key ?? property?.name) === key
+    );
+    return match?.value ?? null;
+  }
+  if (properties && typeof properties === 'object') {
+    return properties[key] ?? null;
+  }
+  return null;
+}
+
+async function classifyPreOrderItems(items) {
+  const result = new Map();
+  const unresolvedVariantIds = [];
+
+  for (const item of items) {
+    const variantId = item.variant_id.toString();
+    // Hydrogen stamps this private line attribute. Trust the affirmative marker
+    // so checkout remains correct even during a short Batchy outage; never trust
+    // an `rts` marker to downgrade a real pre-order.
+    if (itemProperty(item, '_shipping_bucket') === 'preorder') {
+      result.set(variantId, true);
+    } else {
+      unresolvedVariantIds.push(variantId);
+    }
+  }
+
+  if (unresolvedVariantIds.length > 0) {
+    const fetched = await getVariantPreOrderStatus([...new Set(unresolvedVariantIds)]);
+    for (const variantId of unresolvedVariantIds) {
+      // A duplicate line can carry the same variant without the Hydrogen
+      // marker. Never let that unresolved duplicate overwrite an affirmative
+      // marker from another line of the same variant.
+      if (result.get(variantId) !== true) {
+        result.set(variantId, fetched.get(variantId) || false);
+      }
+    }
+  }
+
+  return result;
+}
+
 // Routes
 
 // OAuth initiation route (optional - for manual installs)
@@ -337,7 +374,7 @@ app.get('/auth', (req, res) => {
     return res.status(400).send('Missing shop parameter');
   }
   
-  const scopes = 'read_products,write_shipping,write_products';
+  const scopes = 'read_products,write_shipping,write_products,write_discounts';
   const redirectUri = `${process.env.APP_DOMAIN}/auth/callback`;
   const state = crypto.randomBytes(16).toString('hex');
   
@@ -720,11 +757,9 @@ app.post('/rates', async (req, res) => {
       // If no mystery box items, continue with normal RTS/PO logic below
     }
     
-    // Get variant IDs
-    const variantIds = rate.items.map(item => item.variant_id.toString());
-
-    // Fetch pre-order status for all variants from PreProduct
-    const variantStatuses = await getVariantPreOrderStatus(variantIds);
+    // Prefer Hydrogen's affirmative line marker, then fall back to Batchy for
+    // accelerated checkouts and legacy carts without line properties.
+    const variantStatuses = await classifyPreOrderItems(rate.items);
 
     // Calculate subtotals for THIS delivery group
     let rtsSubtotal = 0;
@@ -742,114 +777,29 @@ app.post('/rates', async (req, res) => {
       }
     }
 
-    // Shopify sends one /rates request per fulfillment group, but order_totals
-    // contains the full cart subtotal in every callback. Use that authoritative
-    // total for ready-to-ship qualification so split in-stock carts never depend
-    // on sibling callbacks arriving within a timing window.
-    const rawOrderSubtotal = rate.order_totals?.subtotal_price;
-    const parsedOrderSubtotal = Number(rawOrderSubtotal);
-    const hasShopifyOrderSubtotal = rawOrderSubtotal !== undefined &&
-      rawOrderSubtotal !== null &&
-      Number.isFinite(parsedOrderSubtotal) &&
-      parsedOrderSubtotal >= 0;
-
-    let combinedRtsTotal = hasShopifyOrderSubtotal ? parsedOrderSubtotal : rtsSubtotal;
-    let combinedPoTotal = preorderSubtotal;
-    const dest = rate.destination || {};
-    const destKey = `ship:order:${dest.postal_code || ''}:${dest.address1 || ''}`.toLowerCase().replace(/\s+/g, '');
-
-    if (rtsSubtotal > 0 || preorderSubtotal > 0) {
-      try {
-        const groupId = crypto.randomUUID();
-        // Shopify added order_totals in November 2025. Retain the old RTS
-        // cross-group combiner only as a fallback for malformed/legacy payloads.
-        // Pre-orders still qualify independently, so their group totals continue
-        // to use the combiner.
-        if (rtsSubtotal > 0 && !hasShopifyOrderSubtotal) {
-          cacheSet(`${destKey}:rts:${groupId}`, rtsSubtotal, CROSS_GROUP_TTL_SECONDS);
-        }
-        if (preorderSubtotal > 0) {
-          cacheSet(`${destKey}:po:${groupId}`, preorderSubtotal, CROSS_GROUP_TTL_SECONDS);
-        }
-
-        // Wait for sibling delivery groups to register, then combine.
-        //
-        // This used to be a single fixed 750ms sleep, which assumed Shopify issues
-        // every delivery group's callback near-simultaneously. It does not always:
-        // when the two callbacks arrive more than 750ms apart, the FIRST one wakes
-        // up alone, sees only its own subtotal, and charges the fee — even though
-        // the customer's full order clears the threshold. That is exactly what a
-        // customer screenshotted on 2026-08-03 ($76 order split across two
-        // warehouses: one group $0, the other $5, total $5) and it had been
-        // happening to real orders for months.
-        //
-        // Instead of sleeping a fixed amount and hoping, poll until the combined
-        // total clears the threshold or the window expires. Two consequences:
-        //   - a group whose OWN subtotal already clears never waits at all
-        //   - a group that is under on its own waits for its siblings, and returns
-        //     the moment they land rather than at a fixed deadline
-        const deadline = Date.now() + CROSS_GROUP_WINDOW_MS;
-        const sumKeys = (bucket) => {
-          const keys = cacheKeys(`${destKey}:${bucket}:*`);
-          return { count: keys.length, total: keys.reduce((sum, k) => sum + (cacheGet(k) || 0), 0) };
-        };
-        // A bucket is settled once it clears the threshold — more siblings can only
-        // push it higher, so there is nothing left to wait for.
-        const settled = () =>
-          (rtsSubtotal === 0 || hasShopifyOrderSubtotal || combinedRtsTotal >= appConfig.threshold) &&
-          (preorderSubtotal === 0 || combinedPoTotal >= appConfig.threshold);
-
-        let polls = 0;
-        for (;;) {
-          if (rtsSubtotal > 0 && !hasShopifyOrderSubtotal) {
-            const { count, total } = sumKeys('rts');
-            if (count > 1) combinedRtsTotal = total;
-          }
-          if (preorderSubtotal > 0) {
-            const { count, total } = sumKeys('po');
-            if (count > 1) combinedPoTotal = total;
-          }
-          if (settled() || Date.now() >= deadline) break;
-          polls++;
-          await new Promise(resolve => setTimeout(resolve, CROSS_GROUP_POLL_MS));
-        }
-
-        if (combinedRtsTotal !== rtsSubtotal || combinedPoTotal !== preorderSubtotal) {
-          console.log(`Cross-location combine after ${polls} poll(s): RTS $${combinedRtsTotal/100}, PO $${combinedPoTotal/100}`);
-        } else if (!settled()) {
-          console.warn(`Cross-location WINDOW EXPIRED after ${CROSS_GROUP_WINDOW_MS}ms with no sibling group — `
-            + `charging on this group alone (RTS $${rtsSubtotal/100}, PO $${preorderSubtotal/100}). `
-            + `If this order was split, the customer is being overcharged.`);
-        }
-      } catch (e) {
-        console.log('Cross-location tracking error (non-fatal):', e.message);
-        // Fall back to per-group threshold
-      }
-    }
-
+    // Carrier callbacks see one delivery group at a time. They therefore cannot
+    // safely decide either whole-pool $50 threshold. Always quote the base $5;
+    // the Shipping Discount Function sees every group and merchandise line
+    // subtotal in one atomic invocation.
     const rates = [];
 
     // Emit RTS rate if there are RTS items
-    // Use combinedRtsTotal for threshold check (cross-location aware)
     if (rtsSubtotal > 0) {
-      const rtsPrice = combinedRtsTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold;
       rates.push({
         service_name: appConfig.labels.rts,
         service_code: "RTS_STD",
-        total_price: rtsPrice.toString(),
+        total_price: appConfig.feeUnderThreshold.toString(),
         currency: appConfig.currency,
         description: appConfig.descriptions.rts
       });
     }
 
     // Emit Pre-Order rate if there are PO items
-    // Use combinedPoTotal for threshold check (cross-location aware)
     if (preorderSubtotal > 0) {
-      const poPrice = combinedPoTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold;
       rates.push({
         service_name: appConfig.labels.po,
         service_code: "PO_STD",
-        total_price: poPrice.toString(),
+        total_price: appConfig.feeUnderThreshold.toString(),
         currency: appConfig.currency,
         description: appConfig.descriptions.po
       });
@@ -857,10 +807,7 @@ app.post('/rates', async (req, res) => {
 
     const processingTime = Date.now() - startTime;
     console.log(`Rates calculated in ${processingTime}ms for ${rate.items.length} items`);
-    const rtsQualificationSource = hasShopifyOrderSubtotal
-      ? `Shopify order subtotal: $${combinedRtsTotal/100}`
-      : `legacy combined subtotal: $${combinedRtsTotal/100}`;
-    console.log(`RTS subtotal: $${rtsSubtotal/100} (${rtsQualificationSource}), PO subtotal: $${preorderSubtotal/100}`);
+    console.log(`Carrier base rates — RTS subtotal: $${rtsSubtotal/100}, PO subtotal: $${preorderSubtotal/100}`);
     
     res.json({ rates });
     
@@ -1069,12 +1016,14 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-app.listen(port, () => {
-  console.log(`Ship Ship Hooray running on port ${port}`);
-  console.log(`Environment: ${process.env.NODE_ENV}`);
-  console.log(`App domain: ${process.env.APP_DOMAIN}`);
-  console.log(`Batchy API: ${process.env.BATCHY_API_KEY ? 'Configured' : 'Missing'}`);
-  console.log(`Batchy URL: ${process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(port, () => {
+    console.log(`Ship Ship Hooray running on port ${port}`);
+    console.log(`Environment: ${process.env.NODE_ENV}`);
+    console.log(`App domain: ${process.env.APP_DOMAIN}`);
+    console.log(`Batchy API: ${process.env.BATCHY_API_KEY ? 'Configured' : 'Missing'}`);
+    console.log(`Batchy URL: ${process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'}`);
+  });
+}
 
 export default app;

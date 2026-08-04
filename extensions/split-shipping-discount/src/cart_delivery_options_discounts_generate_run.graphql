@@ -1,0 +1,31 @@
+query DeliveryInput {
+  presentmentCurrencyRate
+  cart {
+    deliveryGroups {
+      id
+      cartLines {
+        id
+        quantity
+        shippingBucket: attribute(key: "_shipping_bucket") {
+          value
+        }
+        cost {
+          totalAmount {
+            amount
+          }
+        }
+      }
+      deliveryOptions {
+        handle
+        code
+        title
+        cost {
+          amount
+        }
+      }
+    }
+  }
+  discount {
+    discountClasses
+  }
+}

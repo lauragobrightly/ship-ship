@@ -1,21 +1,44 @@
-# 2026-08-04 — Shopify order totals for in-stock free shipping
+# 2026-08-04 — Exact split-shipping design
 
 ## Change
 
-Ready-to-ship rates now use `rate.order_totals.subtotal_price`, the full cart subtotal Shopify includes in every carrier callback. A $76 in-stock cart split into two $38 fulfillment groups therefore returns free shipping for both groups without waiting for the callbacks to find each other.
+The earlier patch treated `rate.order_totals.subtotal_price` as ready-stock merchandise. That is incorrect for mixed carts: it is the whole-cart subtotal, so $30 ready stock plus a $60 preorder could make both shipments free.
 
-Preorder qualification remains separate. The destination-key callback combiner remains only for preorder totals and as a fallback when Shopify omits or malforms `order_totals`.
+The final design removes threshold decisions from the carrier callback. It always returns the $5 base standard rate for each delivery group. This is the only safe direction because a Discount Function can reduce a shipping rate but cannot add back a fee that the carrier made free from incomplete or pre-discount data.
+
+A new Shopify Shipping Discount Function is the authoritative checkout step. It receives every delivery group atomically, classifies groups from `PO_STD`/`RTS_STD` with the private line marker as a conflict guard, totals post-discount merchandise values separately, and adjusts only Ship Ship Hooray's standard options:
+
+- qualifying pools: all groups free;
+- non-qualifying pools: one $5 group, with duplicate location fees removed;
+- express and unrelated rates: untouched;
+- mixed-promise delivery group: unchanged and treated as a launch-test failure.
 
 ## Why the bug looked new
 
-The race had existed for months. Most orders used one fulfillment location or produced callbacks within the old 750 ms window. The reported cart used two warehouses, and the callbacks arrived far enough apart for the first $38 group to return a $5 rate before the second group registered.
+The race had existed for months. Carrier callbacks are separate requests and Shopify can impose a three-second deadline. No in-memory wait can guarantee that sibling delivery groups arrive before the first response is due. The Function removes that timing dependency because Shopify passes all delivery groups to one invocation.
 
 ## Validation
 
-- `npm test`: 7 tests passed.
-- Added a regression proving a lone $38 fulfillment callback returns immediately and free when Shopify reports a $76 cart subtotal.
-- Kept the legacy concurrent and two-second-skew callback tests.
+- Carrier suite: 17/17 tests passed.
+- Function suite: 32/32 tests passed, plus 441 exhaustive threshold/location
+  combinations enforcing one fee per non-qualifying pool.
+- Covered exact boundaries, two independent pools, one-to-three locations,
+  post-discount totals, presentment currency, legacy carts, service-code/title
+  fallbacks, Batchy outage behavior, duplicate variants, zero-value items,
+  express/unrelated rates, malformed input, and ambiguous mixed groups.
+- The input query validates against Shopify's official 2026-07 Function schema,
+  and Shopify CLI compiled the JavaScript Function to Wasm successfully.
+- Shopify's Wasm runner passed a production-shaped regression fixture matching
+  the reported checkout: two ready-stock groups at $38 each both receive a 100%
+  shipping discount.
 
 ## Deployment
 
-Production deploys automatically from GitHub `main`. Verify the live `/health` endpoint and run a split-rate black-box test after the deployment completes.
+Production deploys automatically from GitHub `main`. Safe rollout order:
+
+1. Link the existing Partner app and add `write_discounts`. Completed.
+2. Build and deploy the Function. Released as app version
+   `split-shipping-2026-08-04` on 2026-08-04.
+3. Activate it as an automatic shipping discount.
+4. Deploy the carrier patch.
+5. Run the full real-checkout matrix before opening Jimothy.

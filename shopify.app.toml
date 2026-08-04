@@ -1,0 +1,19 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "9ebe9d750ac88a7cf6127901dfe17bb8"
+name = "Ship Ship Hooray"
+application_url = "https://ship-ship-production.up.railway.app/"
+embedded = true
+handle = "ship-ship-hooray"
+
+[access_scopes]
+scopes = "read_products,write_discounts,write_products,write_shipping"
+
+[webhooks]
+api_version = "2025-07"
+
+[auth]
+redirect_urls = [ "https://ship-ship-production.up.railway.app/auth/callback" ]
+
+[pos]
+embedded = false
