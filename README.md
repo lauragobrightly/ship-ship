@@ -1,47 +1,38 @@
 # Ship Ship Hooray
 
-A variant-aware shipping rate calculator that splits cart items by pre-order status and applies different shipping rates accordingly.
+Wildwoven's Shopify carrier service for ready-to-ship and preorder rates.
 
-## 🚀 Quick Deploy
+## Shipping rules
 
-### Railway (Recommended)
-1. Fork this repository: https://github.com/lauragobrightly/ship-ship
-2. Connect to [Railway](https://railway.app)
-3. Add Redis database
-4. Set environment variables
-5. Deploy!
+- Ready-to-ship groups use Shopify's full `order_totals.subtotal_price` for the $50 free-shipping threshold. Split fulfillment locations do not change qualification.
+- Preorder groups qualify separately and use Batchy as the variant-status source.
+- Domestic groups under their applicable threshold cost $5.
+- International orders defer to Shopify's native rates.
 
-### Environment Variables Required
-- SHOPIFY_API_KEY=your_api_key
-- SHOPIFY_API_SECRET=your_api_secret
-- SHOPIFY_WEBHOOK_SECRET=your_webhook_secret
-- SHOPIFY_ACCESS_TOKEN=your_access_token
-- SHOPIFY_SHOP_DOMAIN=your-shop.myshopify.com
-- APP_DOMAIN=https://your-deployed-app.com
-- REDIS_URL=redis://your-redis-url
+Shopify can call `/rates` once per fulfillment group. Since November 2025, every callback includes the full cart subtotal in `order_totals`. The service uses that value directly for in-stock items instead of trying to reconstruct the cart from callbacks that can arrive seconds apart.
 
-## Features
-- ✅ Split shipping by variant pre-order status
-- ✅ Configurable thresholds and rates  
-- ✅ Kill switch for promotions
-- ✅ Redis caching for performance
-- ✅ Admin interface for configuration
+## Production
 
-## How It Works
-1. Reads `preproduct.is_preorder` metafield on variants
-2. Splits cart into "Ready-to-Ship" vs "Pre-Order" buckets
-3. Applies threshold-based rates to each bucket
-4. Returns up to 2 shipping options to Shopify
+- Host: Railway service `ship-ship` in project `brilliant-elegance`
+- URL: `https://ship-ship-production.up.railway.app`
+- Deployment: GitHub auto-deploy from `main`
+- Cache: in-process TTL cache
 
-## Installation
-1. Create Shopify app in Partners dashboard with name "Ship Ship Hooray"
-2. Deploy this code to Railway/Heroku/Vercel
-3. Set environment variables
-4. Install on your store
-5. Configure via admin interface
+## Required environment variables
+
+- `SHOPIFY_API_KEY`
+- `SHOPIFY_API_SECRET`
+- `SHOPIFY_WEBHOOK_SECRET`
+- `SHOPIFY_ACCESS_TOKEN`
+- `SHOPIFY_SHOP_DOMAIN`
+- `APP_DOMAIN`
+- `BATCHY_API_KEY`
+- `BATCHY_URL`
+
+`CROSS_GROUP_WINDOW_MS` is optional. It controls the legacy/preorder sibling-callback fallback and defaults to 3000 ms.
 
 ## Testing
+
 ```bash
 npm test
-
-See full documentation in /docs folder.
+```

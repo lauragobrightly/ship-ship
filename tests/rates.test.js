@@ -1,43 +1,11 @@
 import request from 'supertest';
+import {jest} from '@jest/globals';
 import app from '../server.js';
 
-// Mock Redis with in-memory store for cross-location tests
-const redisStore = {};
-jest.mock('redis', () => ({
-  createClient: () => ({
-    connect: jest.fn(),
-    get: jest.fn((key) => Promise.resolve(redisStore[key] || null)),
-    set: jest.fn((key, value, opts) => {
-      redisStore[key] = value;
-      return Promise.resolve('OK');
-    }),
-    setEx: jest.fn((key, ttl, value) => {
-      redisStore[key] = value;
-      return Promise.resolve('OK');
-    }),
-    del: jest.fn((key) => {
-      delete redisStore[key];
-      return Promise.resolve(1);
-    }),
-    keys: jest.fn((pattern) => {
-      const prefix = pattern.replace('*', '');
-      const matches = Object.keys(redisStore).filter(k => k.startsWith(prefix));
-      return Promise.resolve(matches);
-    }),
-    mGet: jest.fn((keys) => {
-      return Promise.resolve(keys.map(k => redisStore[k] || null));
-    }),
-    info: jest.fn().mockResolvedValue('memory info'),
-    isReady: true,
-    on: jest.fn()
-  })
-}));
-
-// Mock fetch for GraphQL calls
-global.fetch = jest.fn();
-
 describe('Shipping Rates API', () => {
-  const mockRateRequest = (items, destOverride = {}) => ({
+  let defaultAddress;
+
+  const mockRateRequest = (items, destOverride = {}, orderSubtotal) => ({
     rate: {
       origin: {
         country: "US",
@@ -50,35 +18,25 @@ describe('Shipping Rates API', () => {
         postal_code: "10001",
         province: "NY",
         city: "New York",
+        address1: defaultAddress,
         ...destOverride
       },
       items,
       currency: "USD",
-      locale: "en"
+      locale: "en",
+      ...(orderSubtotal === undefined ? {} : {
+        order_totals: {
+          subtotal_price: String(orderSubtotal),
+          total_price: String(orderSubtotal),
+          discount_amount: "0"
+        }
+      })
     }
   });
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // Clear Redis store between tests
-    for (const key of Object.keys(redisStore)) {
-      delete redisStore[key];
-    }
-
-    // Mock GraphQL response
-    fetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        data: {
-          nodes: [
-            {
-              id: "gid://shopify/ProductVariant/789012",
-              metafield: null
-            }
-          ]
-        }
-      })
-    });
+    defaultAddress = `Test ${expect.getState().currentTestName}`;
   });
 
   test('RTS $30 → "Ships Now" $5', async () => {
@@ -98,7 +56,7 @@ describe('Shipping Rates API', () => {
 
     const response = await request(app)
       .post('/rates')
-      .send(mockRateRequest(items))
+      .send(mockRateRequest(items, {}, 3000))
       .expect(200);
 
     expect(response.body.rates).toHaveLength(1);
@@ -127,7 +85,7 @@ describe('Shipping Rates API', () => {
 
     const response = await request(app)
       .post('/rates')
-      .send(mockRateRequest(items))
+      .send(mockRateRequest(items, {}, 6000))
       .expect(200);
 
     expect(response.body.rates).toHaveLength(1);
@@ -228,6 +186,35 @@ describe('Shipping Rates API', () => {
     expect([r1.body.rates[0]?.total_price, r2.body.rates[0]?.total_price]).toEqual(["0", "0"]);
   });
 
+  test('Shopify order total makes a split $38 group free without waiting for a sibling', async () => {
+    const items = [{
+      name: "Split In-Stock Item",
+      sku: "SPLIT-RTS",
+      quantity: 1,
+      grams: 200,
+      price: 3800,
+      vendor: "Wildwoven",
+      requires_shipping: true,
+      taxable: true,
+      fulfillment_service: "manual",
+      product_id: 555555,
+      variant_id: 789012
+    }];
+
+    const started = Date.now();
+    const response = await request(app)
+      .post('/rates')
+      .send(mockRateRequest(
+        items,
+        {postal_code: "28104", address1: "Shopify Total Street"},
+        7600
+      ))
+      .expect(200);
+
+    expect(response.body.rates[0]?.total_price).toBe("0");
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   test('Single location $30 → still $5 (no cross-location boost)', async () => {
     const items = [{
       name: "Small Item",
@@ -245,7 +232,7 @@ describe('Shipping Rates API', () => {
 
     const response = await request(app)
       .post('/rates')
-      .send(mockRateRequest(items))
+      .send(mockRateRequest(items, {}, 3000))
       .expect(200);
 
     expect(response.body.rates[0].total_price).toBe("500");

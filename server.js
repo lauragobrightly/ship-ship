@@ -143,17 +143,13 @@ const appConfig = {
 // Cache TTL (15 minutes — short enough to pick up Batchy status changes quickly)
 const CACHE_TTL = 15 * 60;
 
-// Cross-location delivery-group combining. Shopify calls /rates once per delivery
-// group, each seeing only its own items, so a group has to wait to learn the order's
-// real total. Shopify's carrier-service timeout is ~10s; 3s leaves ample headroom
-// while covering the multi-second skew observed between real callbacks.
+// Legacy cross-location delivery-group combining. Current Shopify callbacks include
+// order_totals, which is authoritative for ready-to-ship qualification. This window
+// now applies only to pre-order totals and as an RTS fallback if order_totals is
+// absent or malformed.
 //
-// Only a group that is UNDER the threshold on its own ever waits — a group that
-// already clears it returns immediately, and a group whose sibling has already
-// registered returns as soon as it reads the combined total. So this window is the
-// worst-case added latency for sub-threshold carts (which get charged either way),
-// not a blanket delay on checkout. Tunable without a redeploy if that trade needs
-// adjusting.
+// Only an unsettled legacy/pre-order group waits. Current in-stock requests with a
+// valid Shopify order subtotal return immediately.
 const CROSS_GROUP_WINDOW_MS = Number(process.env.CROSS_GROUP_WINDOW_MS || 3000);
 const CROSS_GROUP_POLL_MS = 100;
 const CROSS_GROUP_TTL_SECONDS = 30;
@@ -746,13 +742,18 @@ app.post('/rates', async (req, res) => {
       }
     }
 
-    // Cross-location free shipping: When Shopify splits an order across
-    // fulfillment locations, it calls /rates once per delivery group.
-    // Each group only sees its own items, so a $100 order split into
-    // $60 + $40 would charge $5 shipping on the $40 group.
-    // Fix: use in-memory cache to track the combined totals across all groups
-    // for the same destination, so the $50 threshold applies to the full order.
-    let combinedRtsTotal = rtsSubtotal;
+    // Shopify sends one /rates request per fulfillment group, but order_totals
+    // contains the full cart subtotal in every callback. Use that authoritative
+    // total for ready-to-ship qualification so split in-stock carts never depend
+    // on sibling callbacks arriving within a timing window.
+    const rawOrderSubtotal = rate.order_totals?.subtotal_price;
+    const parsedOrderSubtotal = Number(rawOrderSubtotal);
+    const hasShopifyOrderSubtotal = rawOrderSubtotal !== undefined &&
+      rawOrderSubtotal !== null &&
+      Number.isFinite(parsedOrderSubtotal) &&
+      parsedOrderSubtotal >= 0;
+
+    let combinedRtsTotal = hasShopifyOrderSubtotal ? parsedOrderSubtotal : rtsSubtotal;
     let combinedPoTotal = preorderSubtotal;
     const dest = rate.destination || {};
     const destKey = `ship:order:${dest.postal_code || ''}:${dest.address1 || ''}`.toLowerCase().replace(/\s+/g, '');
@@ -760,8 +761,11 @@ app.post('/rates', async (req, res) => {
     if (rtsSubtotal > 0 || preorderSubtotal > 0) {
       try {
         const groupId = crypto.randomUUID();
-        // Store both RTS and PO subtotals for this group (30s TTL)
-        if (rtsSubtotal > 0) {
+        // Shopify added order_totals in November 2025. Retain the old RTS
+        // cross-group combiner only as a fallback for malformed/legacy payloads.
+        // Pre-orders still qualify independently, so their group totals continue
+        // to use the combiner.
+        if (rtsSubtotal > 0 && !hasShopifyOrderSubtotal) {
           cacheSet(`${destKey}:rts:${groupId}`, rtsSubtotal, CROSS_GROUP_TTL_SECONDS);
         }
         if (preorderSubtotal > 0) {
@@ -792,12 +796,12 @@ app.post('/rates', async (req, res) => {
         // A bucket is settled once it clears the threshold — more siblings can only
         // push it higher, so there is nothing left to wait for.
         const settled = () =>
-          (rtsSubtotal === 0 || combinedRtsTotal >= appConfig.threshold) &&
+          (rtsSubtotal === 0 || hasShopifyOrderSubtotal || combinedRtsTotal >= appConfig.threshold) &&
           (preorderSubtotal === 0 || combinedPoTotal >= appConfig.threshold);
 
         let polls = 0;
         for (;;) {
-          if (rtsSubtotal > 0) {
+          if (rtsSubtotal > 0 && !hasShopifyOrderSubtotal) {
             const { count, total } = sumKeys('rts');
             if (count > 1) combinedRtsTotal = total;
           }
@@ -853,7 +857,10 @@ app.post('/rates', async (req, res) => {
 
     const processingTime = Date.now() - startTime;
     console.log(`Rates calculated in ${processingTime}ms for ${rate.items.length} items`);
-    console.log(`RTS subtotal: $${rtsSubtotal/100} (combined: $${combinedRtsTotal/100}), PO subtotal: $${preorderSubtotal/100}`);
+    const rtsQualificationSource = hasShopifyOrderSubtotal
+      ? `Shopify order subtotal: $${combinedRtsTotal/100}`
+      : `legacy combined subtotal: $${combinedRtsTotal/100}`;
+    console.log(`RTS subtotal: $${rtsSubtotal/100} (${rtsQualificationSource}), PO subtotal: $${preorderSubtotal/100}`);
     
     res.json({ rates });
     
