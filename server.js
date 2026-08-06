@@ -376,7 +376,19 @@ function parseUnsignedInteger(value) {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+/**
+ * Rebuild Hydrogen's signed payload.
+ *
+ * `version` selects the contract, and `quantity` means different things under
+ * each: under v1 it is the quantity Shopify sent in this callback, under v2 it
+ * is the cart line's own full quantity published as `_ww_ship_qty`. Both shapes
+ * must stay supported — the storefront and this service deploy independently,
+ * so carts signed under either version are in flight during the rollout.
+ */
+const SUPPORTED_QUOTE_VERSIONS = ['1', '2'];
+
 function quoteSignaturePayload({
+  version,
   quoteId,
   bucket,
   poolCents,
@@ -388,7 +400,7 @@ function quoteSignaturePayload({
   anchor,
 }) {
   return [
-    '1', quoteId, bucket, poolCents, cartCents, currency,
+    version, quoteId, bucket, poolCents, cartCents, currency,
     productId, variantId, quantity, anchor ? '1' : '0',
   ].join('|');
 }
@@ -401,12 +413,40 @@ function signaturesMatch(actual, expected) {
     crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+/** Identify an item in a log line without leaking the signature or the secret. */
+function quoteItemLabel(item) {
+  return [
+    `sku=${item?.sku ? String(item.sku) : 'n/a'}`,
+    `variant=${item?.variant_id ?? 'n/a'}`,
+    `product=${item?.product_id ?? 'n/a'}`,
+  ].join(' ');
+}
+
+/**
+ * Log why a signed quote was rejected, then return null.
+ *
+ * Every rejection here costs the customer the punitive flat $5, so a silent
+ * `return null` is an invisible overcharge. The quantity-split defect survived
+ * weeks in production precisely because this function had no voice.
+ */
+function rejectSignedQuote(bucket, reason, item) {
+  const where = item ? ` [${quoteItemLabel(item)}]` : '';
+  console.warn(`Signed ${bucket} quote rejected — ${reason}${where}`);
+  return null;
+}
+
 /**
  * Verify Hydrogen's signed whole-pool quote for one carrier delivery group.
  * Returns null on any ambiguity so the caller falls back to a $5 group rate.
  */
 export function verifySignedShippingQuote(items, bucket, rate, secret = process.env.BATCHY_API_KEY) {
-  if (!secret || !Array.isArray(items) || items.length === 0) return null;
+  if (!Array.isArray(items) || items.length === 0) return null;
+  // An entirely unstamped group is the ordinary legacy/accelerated-checkout
+  // path, not a failure — it falls through to unsigned pricing and is not
+  // charged the punitive fee. Stay quiet so the warnings below stay meaningful,
+  // and check the secret only once there is a signature that needs it.
+  if (!hasShippingQuoteMetadata(items)) return null;
+  if (!secret) return rejectSignedQuote(bucket, 'BATCHY_API_KEY is not configured');
 
   let common = null;
   let anchorCount = 0;
@@ -424,34 +464,76 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
     const variantId = String(item?.variant_id ?? '');
     const quantity = parseUnsignedInteger(item?.quantity);
 
-    if (
-      version !== '1' || !quoteId || quotedBucket !== bucket ||
-      poolCents === null || cartCents === null || !currency ||
-      !['0', '1'].includes(anchorValue) || !productId || !variantId ||
-      quantity === null || quantity < 1
-    ) return null;
+    const shapeFailure =
+      (!SUPPORTED_QUOTE_VERSIONS.includes(version) && `unsupported _ww_ship_v "${version}"`) ||
+      (!quoteId && 'missing _ww_ship_quote') ||
+      (quotedBucket !== bucket && `_ww_ship_pool "${quotedBucket}" does not match delivery group bucket "${bucket}"`) ||
+      (poolCents === null && 'malformed _ww_ship_pool_cents') ||
+      (cartCents === null && 'malformed _ww_ship_cart_cents') ||
+      (!currency && 'missing _ww_ship_currency') ||
+      (!['0', '1'].includes(anchorValue) && 'malformed _ww_ship_anchor') ||
+      (!productId && 'missing product_id') ||
+      (!variantId && 'missing variant_id') ||
+      ((quantity === null || quantity < 1) && 'malformed callback quantity');
+    if (shapeFailure) return rejectSignedQuote(bucket, shapeFailure, item);
+
+    // v1 bound the signature to the callback quantity, which Shopify reduces
+    // when it splits a cart line across fulfilment locations. v2 signs the
+    // line's own quantity instead and bounds the callback by it: a split can
+    // only ever shrink a group's quantity, so `callbackQty <= signedQty` keeps
+    // the signature pinned to a specific quantity of a specific variant.
+    const signedQuantity = version === '2'
+      ? parseUnsignedInteger(itemProperty(item, '_ww_ship_qty'))
+      : quantity;
+    if (signedQuantity === null || signedQuantity < 1) {
+      return rejectSignedQuote(bucket, 'missing or malformed _ww_ship_qty on a v2 quote', item);
+    }
+    if (quantity > signedQuantity) {
+      return rejectSignedQuote(
+        bucket,
+        `callback quantity ${quantity} exceeds signed quantity ${signedQuantity}`,
+        item,
+      );
+    }
 
     const anchor = anchorValue === '1';
     const expectedSignature = crypto
       .createHmac('sha256', secret)
       .update(quoteSignaturePayload({
-        quoteId, bucket, poolCents, cartCents, currency,
-        productId, variantId, quantity, anchor,
+        version, quoteId, bucket, poolCents, cartCents, currency,
+        productId, variantId, quantity: signedQuantity, anchor,
       }))
       .digest('hex');
-    if (!signaturesMatch(signature, expectedSignature)) return null;
+    if (!signaturesMatch(signature, expectedSignature)) {
+      return rejectSignedQuote(bucket, `v${version} HMAC mismatch`, item);
+    }
 
     const itemCommon = {quoteId, bucket, poolCents, cartCents, currency};
-    if (common && JSON.stringify(common) !== JSON.stringify(itemCommon)) return null;
+    if (common && JSON.stringify(common) !== JSON.stringify(itemCommon)) {
+      return rejectSignedQuote(
+        bucket,
+        `items disagree on the pool quote (${JSON.stringify(common)} vs ${JSON.stringify(itemCommon)})`,
+        item,
+      );
+    }
     common = itemCommon;
     if (anchor) anchorCount++;
   }
 
-  if (anchorCount > 1) return null;
+  if (anchorCount > 1) {
+    return rejectSignedQuote(bucket, `${anchorCount} anchor lines in one delivery group, expected at most 1`);
+  }
   const orderSubtotal = parseUnsignedInteger(rate?.order_totals?.subtotal_price);
   const rateCurrency = String(rate?.currency ?? '').toUpperCase();
-  if (orderSubtotal === null || orderSubtotal !== common.cartCents) return null;
-  if (rateCurrency && rateCurrency !== common.currency) return null;
+  if (orderSubtotal === null || orderSubtotal !== common.cartCents) {
+    return rejectSignedQuote(
+      bucket,
+      `signed cart total ${common.cartCents} does not match Shopify order subtotal ${orderSubtotal === null ? '(absent/malformed)' : orderSubtotal} — cart changed after stamping`,
+    );
+  }
+  if (rateCurrency && rateCurrency !== common.currency) {
+    return rejectSignedQuote(bucket, `signed currency ${common.currency} does not match rate currency ${rateCurrency}`);
+  }
 
   return {...common, hasAnchor: anchorCount === 1};
 }
@@ -879,6 +961,29 @@ app.post('/rates', async (req, res) => {
     const preorderQuote = preorderItems.length > 0
       ? verifySignedShippingQuote(preorderItems, 'preorder', rate)
       : null;
+    // A group that carries quote metadata but fails verification is charged the
+    // flat fee rather than falling through to unsigned pricing. That stays
+    // deliberately punitive:
+    //
+    //   - the unsigned RTS path qualifies on `order_totals.subtotal_price`,
+    //     which is the WHOLE cart. Falling through on a mixed cart would let
+    //     preorder value buy ready-stock free shipping — the pool leak fixed in
+    //     770d7cd. Failing open here is strictly worse than failing closed.
+    //   - a single callback cannot distinguish "pool is $76 because a sibling
+    //     group holds the other $38" from "poolCents was inflated to $76".
+    //     Comparing poolCents against this group's own item subtotal therefore
+    //     discriminates nothing: a legitimate split presents the same shape as
+    //     the inflation it would be trying to catch. That is the entire reason
+    //     the pool total is signed.
+    //   - the group's own subtotal here is PRE-discount (item.price), while
+    //     poolCents is post-discount, so "this group alone already clears $50"
+    //     is not a sound waiver either — a 50%-off $60 group would be handed
+    //     free shipping it did not earn.
+    //
+    // The quantity-split defect that made this branch fire on honest carts is
+    // fixed at the source (v2 signs `_ww_ship_qty`, not the callback quantity).
+    // What is left is genuinely ambiguous, so it keeps paying the fee — but it
+    // now says so in the logs instead of overcharging silently.
     const invalidRtsQuote = rtsItems.length > 0 &&
       hasShippingQuoteMetadata(rtsItems) && !rtsQuote;
     const invalidPreorderQuote = preorderItems.length > 0 &&
@@ -975,6 +1080,11 @@ app.post('/rates', async (req, res) => {
     // Use combinedRtsTotal for threshold check (cross-location aware)
     if (rtsSubtotal > 0) {
       const signedPrice = priceForSignedPool(rtsQuote);
+      if (invalidRtsQuote) {
+        console.warn(`Charging punitive $${appConfig.feeUnderThreshold / 100} on ready-stock: `
+          + `the group carries a signed quote that failed verification (reason logged above). `
+          + `Group items subtotal $${rtsSubtotal / 100}.`);
+      }
       const rtsPrice = invalidRtsQuote ? appConfig.feeUnderThreshold : signedPrice ??
         (combinedRtsTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold);
       rates.push({
@@ -990,6 +1100,11 @@ app.post('/rates', async (req, res) => {
     // Use combinedPoTotal for threshold check (cross-location aware)
     if (preorderSubtotal > 0) {
       const signedPrice = priceForSignedPool(preorderQuote);
+      if (invalidPreorderQuote) {
+        console.warn(`Charging punitive $${appConfig.feeUnderThreshold / 100} on preorder: `
+          + `the group carries a signed quote that failed verification (reason logged above). `
+          + `Group items subtotal $${preorderSubtotal / 100}.`);
+      }
       const poPrice = invalidPreorderQuote ? appConfig.feeUnderThreshold : signedPrice ??
         (combinedPoTotal >= appConfig.threshold ? 0 : appConfig.feeUnderThreshold);
       rates.push({

@@ -31,25 +31,35 @@ const {
   verifySignedShippingQuote,
 } = await import('../server.js');
 
+/**
+ * The signed payload, per contract version.
+ *
+ * v1 signs the quantity Shopify sends in the callback. v2 signs the cart line's
+ * own quantity, published separately as `_ww_ship_qty`, so a delivery-group
+ * split that reduces the callback quantity no longer breaks the signature.
+ */
 function signaturePayload({
-  quoteId, bucket, poolCents, cartCents, currency = 'USD',
-  productId, variantId, quantity = 1, anchor,
+  version = '1', quoteId, bucket, poolCents, cartCents, currency = 'USD',
+  productId, variantId, signedQuantity = 1, anchor,
 }) {
   return [
-    '1', quoteId, bucket, poolCents, cartCents, currency,
-    productId, variantId, quantity, anchor ? '1' : '0',
+    version, quoteId, bucket, poolCents, cartCents, currency,
+    productId, variantId, signedQuantity, anchor ? '1' : '0',
   ].join('|');
 }
 
 function signedProperties(options, form = 'array') {
   const values = {
     _shipping_bucket: options.bucket,
-    _ww_ship_v: '1',
+    _ww_ship_v: options.version ?? '1',
     _ww_ship_quote: options.quoteId,
     _ww_ship_pool: options.bucket,
     _ww_ship_pool_cents: String(options.poolCents),
     _ww_ship_cart_cents: String(options.cartCents),
     _ww_ship_currency: options.currency ?? 'USD',
+    ...(options.version === '2'
+      ? {_ww_ship_qty: String(options.signedQuantity)}
+      : {}),
     _ww_ship_anchor: options.anchor ? '1' : '0',
     _ww_ship_sig: crypto
       .createHmac('sha256', SECRET)
@@ -61,14 +71,20 @@ function signedProperties(options, form = 'array') {
     : Object.entries(values).map(([name, value]) => ({name, value}));
 }
 
+/**
+ * @param quantity       what Shopify sends in THIS delivery group's callback
+ * @param signedQuantity the cart line's full quantity at signing time; defaults
+ *                       to `quantity`, i.e. an unsplit line
+ */
 function item({
   productId, variantId, price, bucket = 'ready-stock', poolCents,
   cartCents, quoteId = 'quote-1', anchor = false, quantity = 1,
-  propertiesForm = 'array',
+  signedQuantity = quantity, version = '1', propertiesForm = 'array',
 }) {
   const signatureOptions = {
-    quoteId, bucket, poolCents, cartCents, currency: 'USD',
-    productId: String(productId), variantId: String(variantId), quantity, anchor,
+    version, quoteId, bucket, poolCents, cartCents, currency: 'USD',
+    productId: String(productId), variantId: String(variantId),
+    signedQuantity, anchor,
   };
   return {
     name: `Item ${variantId}`,
@@ -180,7 +196,7 @@ describe('signed Hydrogen pool quotes', () => {
     ['removed anchor', (quotedItem) => {
       quotedItem.properties = quotedItem.properties.filter(({name}) => name !== '_ww_ship_anchor');
     }],
-    ['changed quantity', (quotedItem) => { quotedItem.quantity = 2; }],
+    ['quantity raised above the signed quantity', (quotedItem) => { quotedItem.quantity = 2; }],
     ['changed variant', (quotedItem) => { quotedItem.variant_id = 999; }],
   ])('%s invalidates the signature and fails closed at $5', async (_name, tamper) => {
     const quotedItem = item({
@@ -230,5 +246,231 @@ describe('signed Hydrogen pool quotes', () => {
     }
 
     expect(cases).toBe(441);
+  });
+});
+
+/**
+ * v2 signs `_ww_ship_qty` — the cart line's own quantity — instead of the
+ * quantity Shopify happens to send in a delivery-group callback.
+ *
+ * The live defect: a single cart line of quantity 2 fulfilled from two
+ * locations produces two callbacks of quantity 1. Under v1 the signature was
+ * computed over quantity 2, so neither callback verified, and a $76 pool that
+ * had earned free shipping was billed the punitive flat $5.
+ */
+describe('v2 quotes tolerate delivery-group quantity splits', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('the reported defect: a $76 line of qty 2 split across two locations ships free', async () => {
+    const half = () => item({
+      version: '2', productId: 801, variantId: 801, price: 3800,
+      poolCents: 7600, cartCents: 7600, anchor: true,
+      quantity: 1, signedQuantity: 2,
+    });
+
+    const [first, second] = await Promise.all([
+      request(app).post('/rates').send(payload([half()], 7600, 'Split A')).expect(200),
+      request(app).post('/rates').send(payload([half()], 7600, 'Split B')).expect(200),
+    ]);
+
+    expect(first.body.rates[0].total_price).toBe('0');
+    expect(second.body.rates[0].total_price).toBe('0');
+  });
+
+  test('the same split under v1 is exactly the bug — proving the version bump is the fix', async () => {
+    const v1Half = item({
+      version: '1', productId: 802, variantId: 802, price: 3800,
+      poolCents: 7600, cartCents: 7600, anchor: true,
+      quantity: 1, signedQuantity: 2,
+    });
+    const response = await request(app)
+      .post('/rates').send(payload([v1Half], 7600, 'Split v1')).expect(200);
+
+    expect(response.body.rates[0].total_price).toBe('500');
+  });
+
+  test('a split preorder line behaves identically', async () => {
+    const half = () => item({
+      version: '2', bucket: 'preorder', productId: 803, variantId: 803, price: 3800,
+      poolCents: 7600, cartCents: 7600, anchor: true,
+      quantity: 1, signedQuantity: 2,
+    });
+
+    const [first, second] = await Promise.all([
+      request(app).post('/rates').send(payload([half()], 7600, 'PO Split A')).expect(200),
+      request(app).post('/rates').send(payload([half()], 7600, 'PO Split B')).expect(200),
+    ]);
+
+    expect(first.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
+    expect(second.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
+  });
+
+  test('an unsplit v2 line still verifies and an under-$50 pool still pays once', async () => {
+    const anchor = item({
+      version: '2', productId: 804, variantId: 804, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: true, quantity: 1,
+    });
+    const sibling = item({
+      version: '2', productId: 805, variantId: 805, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false, quantity: 1,
+    });
+
+    const [first, second] = await Promise.all([
+      request(app).post('/rates').send(payload([anchor], 4000, 'V2 Under A')).expect(200),
+      request(app).post('/rates').send(payload([sibling], 4000, 'V2 Under B')).expect(200),
+    ]);
+    const prices = [first, second].map((response) => Number(response.body.rates[0].total_price));
+    expect(prices.reduce((sum, price) => sum + price, 0)).toBe(500);
+    expect(prices.sort()).toEqual([0, 500]);
+  });
+
+  test('a callback quantity ABOVE the signed quantity is rejected and fails closed at $5', async () => {
+    // A split can only ever shrink a group's quantity. Growth is the inflation
+    // the bound exists to catch: 3 units billed against a 1-unit signature.
+    const inflated = item({
+      version: '2', productId: 806, variantId: 806, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false,
+      quantity: 1, signedQuantity: 1,
+    });
+    inflated.quantity = 3;
+
+    const response = await request(app)
+      .post('/rates').send(payload([inflated], 4000, 'V2 Inflated')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('500');
+  });
+
+  test('a v2 quote with _ww_ship_qty stripped fails closed', async () => {
+    const stripped = item({
+      version: '2', productId: 807, variantId: 807, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false,
+      quantity: 1, signedQuantity: 2,
+    });
+    stripped.properties = stripped.properties.filter(({name}) => name !== '_ww_ship_qty');
+
+    const response = await request(app)
+      .post('/rates').send(payload([stripped], 4000, 'V2 No Qty')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('500');
+  });
+
+  test('_ww_ship_qty is signed — inflating it to clear the bound fails closed', async () => {
+    const forged = item({
+      version: '2', productId: 808, variantId: 808, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false,
+      quantity: 5, signedQuantity: 1,
+    });
+    const property = forged.properties.find(({name}) => name === '_ww_ship_qty');
+    property.value = '5';
+
+    const response = await request(app)
+      .post('/rates').send(payload([forged], 4000, 'V2 Forged Qty')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('500');
+  });
+
+  test.each([
+    ['tampered pool total', (quotedItem) => {
+      const property = quotedItem.properties.find(({name}) => name === '_ww_ship_pool_cents');
+      property.value = '9900';
+    }],
+    ['tampered cart total', (quotedItem) => {
+      const property = quotedItem.properties.find(({name}) => name === '_ww_ship_cart_cents');
+      property.value = '9900';
+    }],
+    ['tampered bucket', (quotedItem) => {
+      const property = quotedItem.properties.find(({name}) => name === '_ww_ship_pool');
+      property.value = 'preorder';
+    }],
+    ['tampered currency', (quotedItem) => {
+      const property = quotedItem.properties.find(({name}) => name === '_ww_ship_currency');
+      property.value = 'CAD';
+    }],
+    ['flipped anchor', (quotedItem) => {
+      const property = quotedItem.properties.find(({name}) => name === '_ww_ship_anchor');
+      property.value = '1';
+    }],
+    ['changed variant', (quotedItem) => { quotedItem.variant_id = 999; }],
+    ['unknown version', (quotedItem) => {
+      const property = quotedItem.properties.find(({name}) => name === '_ww_ship_v');
+      property.value = '3';
+    }],
+  ])('v2 %s still fails closed at $5', async (_name, tamper) => {
+    const quotedItem = item({
+      version: '2', productId: 809, variantId: 809, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false,
+      quantity: 1, signedQuantity: 2,
+    });
+    tamper(quotedItem);
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([quotedItem], 4000, `V2 Tamper ${_name}`))
+      .expect(200);
+    expect(response.body.rates[0].total_price).toBe('500');
+  });
+});
+
+/**
+ * Both contract versions must price correctly at the same time. The storefront
+ * and the carrier deploy separately, so during the rollout window some carts in
+ * flight are stamped v1 and some v2 — sometimes in the same checkout, if the
+ * customer added a line either side of the storefront deploy.
+ */
+describe('v1 and v2 coexist during the rollout window', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a v1 cart signed before the storefront deploy still ships free at $76', async () => {
+    const legacy = item({
+      version: '1', productId: 901, variantId: 901, price: 7600,
+      poolCents: 7600, cartCents: 7600, anchor: true, quantity: 1,
+    });
+    const response = await request(app)
+      .post('/rates').send(payload([legacy], 7600, 'Legacy v1')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('0');
+  });
+
+  test('a v1 cart under $50 still pays exactly one fee', async () => {
+    const anchor = item({
+      version: '1', productId: 902, variantId: 902, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: true,
+    });
+    const sibling = item({
+      version: '1', productId: 903, variantId: 903, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false,
+    });
+    const [first, second] = await Promise.all([
+      request(app).post('/rates').send(payload([anchor], 4000, 'Legacy Under A')).expect(200),
+      request(app).post('/rates').send(payload([sibling], 4000, 'Legacy Under B')).expect(200),
+    ]);
+    const prices = [first, second].map((response) => Number(response.body.rates[0].total_price));
+    expect(prices.sort()).toEqual([0, 500]);
+  });
+
+  test('v1 and v2 lines in the same delivery group agree on one pool and price once', async () => {
+    // Same quoteId, same pool: a mixed-version group is only coherent if both
+    // signatures verify against their own contract and then agree on the pool.
+    const v1Line = item({
+      version: '1', productId: 904, variantId: 904, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: true, quantity: 1,
+    });
+    const v2Line = item({
+      version: '2', productId: 905, variantId: 905, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false,
+      quantity: 1, signedQuantity: 2,
+    });
+
+    const response = await request(app)
+      .post('/rates').send(payload([v1Line, v2Line], 4000, 'Mixed Versions')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('500');
+  });
+
+  test('a v2 quote verifies with the same helper the v1 path uses', () => {
+    const quotedItem = item({
+      version: '2', productId: 906, variantId: 906, price: 5000,
+      poolCents: 5000, cartCents: 5000, anchor: true,
+      quantity: 1, signedQuantity: 2, propertiesForm: 'object',
+    });
+    const quote = verifySignedShippingQuote(
+      [quotedItem], 'ready-stock', payload([quotedItem], 5000).rate, SECRET,
+    );
+    expect(quote).toMatchObject({poolCents: 5000, hasAnchor: true});
+    expect(priceForSignedPool(quote)).toBe(0);
   });
 });
