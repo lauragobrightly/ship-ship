@@ -211,7 +211,11 @@ describe('signed Hydrogen pool quotes', () => {
     expect(response.body.rates[0].total_price).toBe('500');
   });
 
-  test('stale cart totals invalidate the quote and fail closed', async () => {
+  test('stale cart totals fall back to unsigned pricing, not the punitive fee', async () => {
+    // Signed at $76, but Shopify reports $75 — the cart changed after
+    // stamping. The quote is honest but out of date, so the group is priced
+    // as if unstamped: the $75 order subtotal clears the threshold and ships
+    // free. (Until 2026-08-13 this charged the punitive $5.)
     const quotedItem = item({
       productId: 701, variantId: 701, price: 3800,
       poolCents: 7600, cartCents: 7600, anchor: false,
@@ -219,6 +223,65 @@ describe('signed Hydrogen pool quotes', () => {
     const response = await request(app)
       .post('/rates')
       .send(payload([quotedItem], 7500, 'Stale Cart'))
+      .expect(200);
+    expect(response.body.rates[0].total_price).toBe('0');
+  });
+
+  test('the discount-code cart: signed post-discount subtotal ≠ pre-discount order subtotal ships free', async () => {
+    // The production incident of 2026-08-06..13. A 10% code makes Hydrogen
+    // sign cartCents 5400 while Shopify's callback reports the pre-discount
+    // 6000. Two $30 preorder items — $60 of preorder, "Free over $50" — were
+    // billed the punitive $5 on every such cart.
+    const quotedItem = item({
+      productId: 801, variantId: 801, price: 3000, quantity: 2,
+      bucket: 'preorder', poolCents: 5400, cartCents: 5400, anchor: true,
+      version: '2', signedQuantity: 2,
+    });
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([quotedItem], 6000, 'Discount Code Cart'))
+      .expect(200);
+    const rate = response.body.rates.find((r) => r.service_code === 'PO_STD');
+    expect(rate.total_price).toBe('0');
+  });
+
+  test('an unstamped line inside a stamped group prices the group unsigned instead of punitively', async () => {
+    // Express checkout added a line after the async re-stamp: one line signed,
+    // its sibling bare. Not tamper evidence — the group prices from Shopify's
+    // own callback items ($60 of preorder → free).
+    const stampedItem = item({
+      productId: 901, variantId: 901, price: 3000,
+      bucket: 'preorder', poolCents: 6000, cartCents: 6000, anchor: true,
+      version: '2', signedQuantity: 1,
+    });
+    const bareItem = {
+      name: 'Added after stamping',
+      quantity: 1,
+      price: 3000,
+      product_id: 902,
+      variant_id: 902,
+      requires_shipping: true,
+      properties: [{name: '_shipping_bucket', value: 'preorder'}],
+    };
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([stampedItem, bareItem], 6000, 'Post-Stamp Addition'))
+      .expect(200);
+    const rate = response.body.rates.find((r) => r.service_code === 'PO_STD');
+    expect(rate.total_price).toBe('0');
+  });
+
+  test('a stale quote never grants the SIGNED pool free shipping when the real items are under $50', async () => {
+    // Staleness falls back to unsigned pricing — it must not fall back to
+    // trusting poolCents. A stale quote claiming a $76 pool on a $38 group
+    // with a $38 order subtotal pays the fee the unsigned path charges.
+    const quotedItem = item({
+      productId: 703, variantId: 703, price: 3800,
+      poolCents: 7600, cartCents: 7600, anchor: true,
+    });
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([quotedItem], 3800, 'Stale Under Threshold'))
       .expect(200);
     expect(response.body.rates[0].total_price).toBe('500');
   });

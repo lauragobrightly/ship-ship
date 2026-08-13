@@ -436,6 +436,33 @@ function rejectSignedQuote(bucket, reason, item) {
 }
 
 /**
+ * A structurally honest quote that is merely out of date — distinct from a
+ * rejection. Rejection means tamper-shaped evidence (bad HMAC, inflated
+ * quantity, disagreeing pools) and stays punitive. Stale means the cart moved
+ * on after stamping, which honest carts do constantly:
+ *
+ *   - a discount code makes Hydrogen's signed post-discount subtotal differ
+ *     from Shopify's pre-discount `order_totals.subtotal_price` on EVERY
+ *     discounted cart (2026-08-06..13: every stamped cart with a 10% code was
+ *     billed the punitive $5 on a legitimately free pool), and
+ *   - an express checkout can add a line after the last re-stamp, leaving one
+ *     line of the group unstamped.
+ *
+ * A stale quote falls back to UNSIGNED pricing, which is computed from
+ * Shopify's own callback items and order totals — values a shopper cannot
+ * forge — so falling back is safe; it merely prices the group as if Hydrogen
+ * had never stamped it. Free shipping from the SIGNED pool is only ever
+ * granted on a quote that verifies fresh.
+ */
+export const STALE_QUOTE = Object.freeze({stale: true});
+
+function staleSignedQuote(bucket, reason, item) {
+  const where = item ? ` [${quoteItemLabel(item)}]` : '';
+  console.warn(`Signed ${bucket} quote stale — ${reason}${where} — falling back to unsigned pricing`);
+  return STALE_QUOTE;
+}
+
+/**
  * Verify Hydrogen's signed whole-pool quote for one carrier delivery group.
  * Returns null on any ambiguity so the caller falls back to a $5 group rate.
  */
@@ -464,8 +491,21 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
     const variantId = String(item?.variant_id ?? '');
     const quantity = parseUnsignedInteger(item?.quantity);
 
+    // A line with no version stamp inside an otherwise-stamped group is the
+    // signature of a post-stamp addition (express checkout racing the async
+    // re-stamp), and an unknown version is a contract this build cannot judge.
+    // Neither is tamper evidence — price the group unsigned.
+    if (!SUPPORTED_QUOTE_VERSIONS.includes(version)) {
+      return staleSignedQuote(
+        bucket,
+        version === ''
+          ? 'a line in this group carries no quote stamp (added after stamping?)'
+          : `unsupported _ww_ship_v "${version}"`,
+        item,
+      );
+    }
+
     const shapeFailure =
-      (!SUPPORTED_QUOTE_VERSIONS.includes(version) && `unsupported _ww_ship_v "${version}"`) ||
       (!quoteId && 'missing _ww_ship_quote') ||
       (quotedBucket !== bucket && `_ww_ship_pool "${quotedBucket}" does not match delivery group bucket "${bucket}"`) ||
       (poolCents === null && 'malformed _ww_ship_pool_cents') ||
@@ -523,10 +563,18 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
   if (anchorCount > 1) {
     return rejectSignedQuote(bucket, `${anchorCount} anchor lines in one delivery group, expected at most 1`);
   }
+  // Freshness, not tampering: Hydrogen signs the POST-discount Storefront
+  // subtotal while Shopify's carrier callback reports the PRE-discount order
+  // subtotal, so any discount code makes these differ on a perfectly honest
+  // cart — as does any line added or removed after the last re-stamp. The
+  // signature already proved the quote's integrity; a mismatch here only
+  // proves it is out of date, so price the group unsigned instead of billing
+  // the punitive fee. (2026-08-06..13 this branch rejected punitively and
+  // silently charged $5 on every stamped cart that used a discount code.)
   const orderSubtotal = parseUnsignedInteger(rate?.order_totals?.subtotal_price);
   const rateCurrency = String(rate?.currency ?? '').toUpperCase();
   if (orderSubtotal === null || orderSubtotal !== common.cartCents) {
-    return rejectSignedQuote(
+    return staleSignedQuote(
       bucket,
       `signed cart total ${common.cartCents} does not match Shopify order subtotal ${orderSubtotal === null ? '(absent/malformed)' : orderSubtotal} — cart changed after stamping`,
     );
@@ -539,7 +587,7 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
 }
 
 export function priceForSignedPool(quote, threshold = appConfig.threshold) {
-  if (!quote) return null;
+  if (!quote || quote.stale) return null;
   if (quote.poolCents >= threshold) return 0;
   return quote.hasAnchor ? appConfig.feeUnderThreshold : 0;
 }
@@ -955,15 +1003,22 @@ app.post('/rates', async (req, res) => {
       }
     }
 
-    const rtsQuote = rtsItems.length > 0
+    const rtsQuoteResult = rtsItems.length > 0
       ? verifySignedShippingQuote(rtsItems, 'ready-stock', rate)
       : null;
-    const preorderQuote = preorderItems.length > 0
+    const preorderQuoteResult = preorderItems.length > 0
       ? verifySignedShippingQuote(preorderItems, 'preorder', rate)
       : null;
-    // A group that carries quote metadata but fails verification is charged the
-    // flat fee rather than falling through to unsigned pricing. That stays
-    // deliberately punitive:
+    // Three verification outcomes:
+    //   verified — the signed pool prices the group;
+    //   stale    — honest quote, cart moved on (discount code, post-stamp
+    //              addition): fall through to unsigned pricing below, exactly
+    //              as if the cart had never been stamped;
+    //   rejected — tamper-shaped (bad HMAC, inflated qty, two anchors...):
+    //              charged the flat fee rather than falling through.
+    const rtsQuote = rtsQuoteResult && !rtsQuoteResult.stale ? rtsQuoteResult : null;
+    const preorderQuote = preorderQuoteResult && !preorderQuoteResult.stale ? preorderQuoteResult : null;
+    // Rejection stays deliberately punitive:
     //
     //   - the unsigned RTS path qualifies on `order_totals.subtotal_price`,
     //     which is the WHOLE cart. Falling through on a mixed cart would let
@@ -981,13 +1036,14 @@ app.post('/rates', async (req, res) => {
     //     free shipping it did not earn.
     //
     // The quantity-split defect that made this branch fire on honest carts is
-    // fixed at the source (v2 signs `_ww_ship_qty`, not the callback quantity).
-    // What is left is genuinely ambiguous, so it keeps paying the fee — but it
-    // now says so in the logs instead of overcharging silently.
+    // fixed at the source (v2 signs `_ww_ship_qty`, not the callback quantity),
+    // and honest staleness (discount codes, post-stamp additions) now falls
+    // through to unsigned pricing above. What is left is genuinely
+    // tamper-shaped, so it keeps paying the fee — and says so in the logs.
     const invalidRtsQuote = rtsItems.length > 0 &&
-      hasShippingQuoteMetadata(rtsItems) && !rtsQuote;
+      hasShippingQuoteMetadata(rtsItems) && !rtsQuoteResult;
     const invalidPreorderQuote = preorderItems.length > 0 &&
-      hasShippingQuoteMetadata(preorderItems) && !preorderQuote;
+      hasShippingQuoteMetadata(preorderItems) && !preorderQuoteResult;
 
     // Shopify sends one /rates request per fulfillment group, but order_totals
     // contains the full cart subtotal in every callback. Use that authoritative
