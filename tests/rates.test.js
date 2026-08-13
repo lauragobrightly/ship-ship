@@ -124,7 +124,7 @@ describe('Shipping Rates API', () => {
     });
   });
 
-  test('Cross-location split: $30 + $30 → both Free (combined $60 > $50)', async () => {
+  test('Cross-location split: $30 + $30 → each group pays $5 (groups-first)', async () => {
     const item1 = [{
       name: "LOTR Zip Romper",
       sku: "ZIP-LOTR",
@@ -165,22 +165,20 @@ describe('Shipping Rates API', () => {
         .expect(200)
     ]);
 
-    // BOTH must be free. This used to assert only `toContain("0")` — at least one
-    // free — which passes when one group is charged $5, i.e. it green-lit the exact
-    // overcharge a customer reported on 2026-08-03.
+    // Groups-first (2026-08-13): each delivery group qualifies on its own
+    // subtotal only. Two $30 groups each pay the fee; there is no combining,
+    // so there is no timing window to lose.
     const prices = [
       response1.body.rates[0]?.total_price,
       response2.body.rates[0]?.total_price
     ];
-    console.log('Cross-location prices:', prices);
-    expect(prices).toEqual(["0", "0"]);
+    expect(prices).toEqual(["500", "500"]);
   });
 
-  test('Cross-location split arriving 2s apart: $38 + $38 → both Free', async () => {
-    // The real failure mode. Shopify does not guarantee that delivery-group
-    // callbacks arrive together; when they were more than 750ms apart the first
-    // one used to wake alone and charge $5. The first request must now wait for
-    // its sibling instead of deciding on its own subtotal.
+  test('Cross-location split arriving 2s apart: $38 + $38 → each pays $5, no waiting', async () => {
+    // Groups-first: sibling timing is irrelevant because groups never combine.
+    // Each $38 group pays the fee deterministically whether callbacks arrive
+    // together or seconds apart.
     const mkItem = (name, productId) => ([{
       name,
       sku: name.toUpperCase().replace(/\s+/g, '-'),
@@ -211,10 +209,10 @@ describe('Shipping Rates API', () => {
     );
 
     const [r1, r2] = await Promise.all([first, second]);
-    expect([r1.body.rates[0]?.total_price, r2.body.rates[0]?.total_price]).toEqual(["0", "0"]);
+    expect([r1.body.rates[0]?.total_price, r2.body.rates[0]?.total_price]).toEqual(["500", "500"]);
   });
 
-  test('Shopify order total makes a split $38 group free without waiting for a sibling', async () => {
+  test('Shopify whole-cart order total is ignored: a $38 group pays $5 (groups-first)', async () => {
     const items = [{
       name: "Split In-Stock Item",
       sku: "SPLIT-RTS",
@@ -239,7 +237,7 @@ describe('Shipping Rates API', () => {
       ))
       .expect(200);
 
-    expect(response.body.rates[0]?.total_price).toBe("0");
+    expect(response.body.rates[0]?.total_price).toBe("500");
     expect(Date.now() - started).toBeLessThan(1000);
   });
 

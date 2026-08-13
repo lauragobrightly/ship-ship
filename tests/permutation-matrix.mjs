@@ -174,29 +174,28 @@ const scenarios = [
   { id: 'u05-po-marker-over', items: [poItem({ quantity: 2 })], orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
   { id: 'u06-po-fallback-new-variant-under', items: [poItem({ variant: '9/10', properties: null })], orderSubtotal: 3000, expect: 'PO_STD=$5.00' },
   { id: 'u07-po-fallback-new-variant-over', items: [poItem({ variant: '9/10', quantity: 2, properties: null }), poItem({ variant: '7/8', properties: null })], orderSubtotal: 9000, expect: 'PO_STD=$0.00' },
-  { id: 'u08-mixed-under-po-under', items: [rtsItem(), poItem()], orderSubtotal: 6800, expect: 'PO_STD=$5.00 RTS_STD=$0.00' }, // RTS rides whole-order subtotal by design
+  { id: 'u08-mixed-under-po-under', items: [rtsItem(), poItem()], orderSubtotal: 6800, expect: 'PO_STD=$5.00 RTS_STD=$5.00' }, // groups-first: each bucket in the group pays on its own subtotal
   { id: 'u09-mixed-po-over', items: [rtsItem({ quantity: 2 }), poItem({ quantity: 2 })], orderSubtotal: 13600, expect: 'PO_STD=$0.00 RTS_STD=$0.00' },
   { id: 'u10-gift-card-only', items: [{ name: 'Gift Card', sku: 'GIFT-50', quantity: 1, grams: 0, price: 5000, product_id: 1, variant_id: 2, requires_shipping: false, product_type: 'Gift Card', properties: null }], orderSubtotal: 5000, expect: 'GIFT_CARD_FREE=$0.00' },
   { id: 'u11-international', items: [rtsItem()], orderSubtotal: 3800, country: 'CA', expect: 'EMPTY' },
 
-  // v1 signed (regression — old storefront contract, unchanged semantics)
+  // v1 signed relics (groups-first ignores every _ww_ship_* stamp; these rows
+  // pin that forged or honest stamps change nothing)
   { id: 'v1-01-po-over', items: poPool({ version: '1', quantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
-  { id: 'v1-02-po-split-line', items: poPool({ version: '1', quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' }, // v1 cannot survive a split; kept byte-identical deliberately
-  { id: 'v1-03-tampered-pool', items: poPool({ version: '1', quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-
-  // v2 signed (what the storefront deployed 2026-08-12 actually emits)
+  { id: 'v1-02-po-split-line', items: poPool({ version: '1', quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' }, // groups-first: $30 package
+  { id: 'v1-03-tampered-pool', items: poPool({ version: '1', quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // stamps are ignored relics: the group's real $60 of items earns free
   { id: 'v2-01-po-over', items: poPool({ quantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
-  { id: 'v2-02-po-split-line', items: poPool({ quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // THE Aug 6 fix
+  { id: 'v2-02-po-split-line', items: poPool({ quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' }, // groups-first: this package only holds $30 of items
   { id: 'v2-03-po-exactly-50', items: poPool({ quantity: 2, poolCents: 5000, cartCents: 5000 }), orderSubtotal: 5000, expect: 'PO_STD=$0.00' },
   { id: 'v2-04-po-under-anchor', items: poPool({ quantity: 1, poolCents: 3000 }), orderSubtotal: 3000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-05-po-under-anchor-elsewhere', items: poPool({ quantity: 1, poolCents: 3000, anchor: false }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' }, // sibling group holds the fee anchor
-  { id: 'v2-06-cb-qty-exceeds-signed', items: poPool({ quantity: 1, callbackQuantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-07-tampered-pool-cents', items: poPool({ quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-08-missing-qty', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_qty: undefined } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-09-wrong-pool-bucket', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_pool: 'ready-stock' } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-10-currency-mismatch', items: poPool({ quantity: 2, poolCents: 6000, currency: 'EUR' }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
+  { id: 'v2-05-po-under-anchor-elsewhere', items: poPool({ quantity: 1, poolCents: 3000, anchor: false }), orderSubtotal: 3000, expect: 'PO_STD=$5.00' }, // groups-first: a $30 package pays its own fee, anchors are dead
+  { id: 'v2-06-cb-qty-exceeds-signed', items: poPool({ quantity: 1, callbackQuantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // stamps ignored: $60 of real items
+  { id: 'v2-07-tampered-pool-cents', items: poPool({ quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // stamps ignored: $60 of real items
+  { id: 'v2-08-missing-qty', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_qty: undefined } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // stamps ignored: $60 of real items
+  { id: 'v2-09-wrong-pool-bucket', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_pool: 'ready-stock' } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // stamps ignored: $60 of real items
+  { id: 'v2-10-currency-mismatch', items: poPool({ quantity: 2, poolCents: 6000, currency: 'EUR' }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // stamps ignored: $60 of real items
   { id: 'v2-11-rts-over', items: rtsPool({ quantity: 2, poolCents: 7600 }), orderSubtotal: 7600, expect: 'RTS_STD=$0.00' },
-  { id: 'v2-12-rts-split-line', items: rtsPool({ quantity: 2, callbackQuantity: 1, poolCents: 7600 }), orderSubtotal: 7600, expect: 'RTS_STD=$0.00' },
+  { id: 'v2-12-rts-split-line', items: rtsPool({ quantity: 2, callbackQuantity: 1, poolCents: 7600 }), orderSubtotal: 7600, expect: 'RTS_STD=$5.00' }, // groups-first: this package only holds $38 of items
   {
     id: 'v2-13-mixed-both-pools-over',
     items: [
@@ -217,7 +216,7 @@ const scenarios = [
       ];
     })(),
     orderSubtotal: 6000,
-    expect: 'PO_STD=$5.00',
+    expect: 'PO_STD=$0.00', // stamps ignored (two anchors included): $60 of real items
   },
   {
     id: 'v2-15-stamped-plus-unstamped-line',
@@ -239,7 +238,7 @@ const scenarios = [
       { items: [poItem()], orderSubtotal: 5500 }, // $30 group
       { items: [{ ...poItem({ variant: '7/8' }), price: 2500 }], orderSubtotal: 5500 }, // $25 group
     ],
-    expect: ['PO_STD=$0.00', 'PO_STD=$0.00'],
+    expect: ['PO_STD=$5.00', 'PO_STD=$5.00'], // groups-first: no combining — each under-$50 package pays its own fee
   },
 ];
 
