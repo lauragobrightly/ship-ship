@@ -7,6 +7,7 @@ import compression from 'compression';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { startWatchdogs } from './watchdog.js';
 
 dotenv.config();
 
@@ -1017,6 +1018,7 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(`App domain: ${process.env.APP_DOMAIN}`);
     console.log(`Batchy API: ${process.env.BATCHY_API_KEY ? 'Configured' : 'Missing'}`);
     console.log(`Batchy URL: ${process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'}`);
+    startWatchdogs({ port, thresholdCents: appConfig.threshold, feeCents: appConfig.feeUnderThreshold });
   });
 }
 
