@@ -1,8 +1,8 @@
-// watchdog.js — keeps groups-first honest after 2026-08-13.
+// watchdog.js — enforces the two fulfillment-pool shipping contract.
 //
 // Two standing checks, alerting through Collie's /alerts/paolo → Slack:
-//   1. Nightly (2:30am PT): run the 33-scenario permutation matrix against
-//      THIS live process. Silent when 33/33; alerts on any mismatch.
+//   1. Nightly (2:30am PT): run the permutation matrix against THIS live
+//      process. Silent when every scenario passes; alerts on any mismatch.
 //   2. Weekly (Monday 7:00am PT): scan the last 7 days of Shopify orders for
 //      shipping charges the policy can't explain. ALWAYS posts one line —
 //      findings or "clean" — so a dead watchdog is visible within a week.
@@ -12,7 +12,7 @@ import fetch from 'node-fetch';
 const ALERT_URL = process.env.COLLIE_ALERT_URL || 'https://collie-production.up.railway.app/alerts/paolo';
 const ALERT_TOKEN = process.env.COLLIE_ALERT_TOKEN || '';
 
-async function sendAlert({ title, body, severity = 'info' }) {
+export async function sendAlert({ title, body, severity = 'info', source = 'ship-ship-watchdog' }) {
   if (!ALERT_TOKEN) {
     console.warn('[watchdog] COLLIE_ALERT_TOKEN not set; alert not sent:', title);
     return;
@@ -21,7 +21,7 @@ async function sendAlert({ title, body, severity = 'info' }) {
     const res = await fetch(ALERT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ALERT_TOKEN}` },
-      body: JSON.stringify({ title, text: body, severity, source: 'ship-ship-watchdog' }),
+      body: JSON.stringify({ title, text: body, severity, source }),
     });
     if (!res.ok) console.error('[watchdog] alert POST failed:', res.status, await res.text());
   } catch (err) {
@@ -92,12 +92,35 @@ export function runMatrixSelfTest(port) {
 
 // ── Weekly overcharge sweep ─────────────────────────────────────────────────
 
-// Pure classifier so it can be unit-tested. Under groups-first, each shipping
-// line is $0 or the flat fee. Suspicious shapes:
-//   - any shipping line above the fee (excluding the mystery-box promo rate)
-//   - a SINGLE shipping line charging the fee while the order subtotal clears
-//     the threshold (one group over $50 must ship free; multi-line orders are
-//     legitimate warehouse splits and are NOT flagged)
+function poolForShippingLine(line) {
+  const code = String(line?.code || '').toUpperCase();
+  const title = String(line?.title || '');
+  if (code === 'RTS_STD' || /ships now|in-stock/i.test(title)) return 'ready-stock';
+  if (code === 'PO_STD' || /pre-?order|ships later/i.test(title)) return 'preorder';
+  return null;
+}
+
+function itemProperty(item, key) {
+  const properties = item?.properties;
+  if (Array.isArray(properties)) {
+    return properties.find((property) =>
+      (property?.name ?? property?.key) === key)?.value ?? null;
+  }
+  return properties?.[key] ?? null;
+}
+
+function lineItemCents(item) {
+  if (item?.discounted_total !== undefined) {
+    return Math.round(Number(item.discounted_total || 0) * 100);
+  }
+  const gross = Math.round(Number(item?.price || 0) * 100) * Number(item?.quantity || 0);
+  const discount = Math.round(Number(item?.total_discount || 0) * 100);
+  return Math.max(0, gross - discount);
+}
+
+// Pure classifier so it can be unit-tested. Physical Shopify delivery groups
+// are not economic pools. Ready-stock may contribute at most one $5 charge and
+// preorder may contribute at most one; either pool is free at $50.
 export function classifyOrderShipping(order, { thresholdCents, feeCents }) {
   // Policy governs US shipments only; international rates legitimately exceed
   // the domestic fee (Economy International tiers, live carrier rates).
@@ -111,9 +134,34 @@ export function classifyOrderShipping(order, { thresholdCents, feeCents }) {
   if (overFee.length) {
     return `shipping line over the fee: ${overFee.map(l => `${l.title} $${l.price}`).join(', ')}`;
   }
-  const paid = lines.filter(l => centsOf(l.price) > 0);
-  if (paid.length && lines.length === 1 && centsOf(order.subtotal_price) >= thresholdCents) {
-    return `single group at $${order.subtotal_price} charged $${paid[0].price} shipping`;
+  const poolLines = lines
+    .map(line => ({ line, pool: poolForShippingLine(line), cents: centsOf(line.price) }))
+    .filter(entry => entry.pool);
+  for (const pool of ['ready-stock', 'preorder']) {
+    const paidCents = poolLines
+      .filter(entry => entry.pool === pool)
+      .reduce((sum, entry) => sum + entry.cents, 0);
+    if (paidCents > feeCents) {
+      return `${pool} charged $${(paidCents / 100).toFixed(2)} across warehouse groups; maximum is $${(feeCents / 100).toFixed(2)}`;
+    }
+  }
+
+  if (Array.isArray(order.line_items) && order.line_items.length) {
+    const poolTotals = {'ready-stock': 0, preorder: 0};
+    for (const item of order.line_items) {
+      if (item?.requires_shipping === false) continue;
+      const marker = itemProperty(item, '_shipping_bucket');
+      const pool = marker === 'preorder' ? 'preorder' : 'ready-stock';
+      poolTotals[pool] += lineItemCents(item);
+    }
+    for (const pool of ['ready-stock', 'preorder']) {
+      const paidCents = poolLines
+        .filter(entry => entry.pool === pool)
+        .reduce((sum, entry) => sum + entry.cents, 0);
+      if (paidCents > 0 && poolTotals[pool] >= thresholdCents) {
+        return `${pool} pool at $${(poolTotals[pool] / 100).toFixed(2)} charged $${(paidCents / 100).toFixed(2)} shipping`;
+      }
+    }
   }
   return null;
 }
@@ -125,7 +173,7 @@ export async function runOverchargeSweep({ thresholdCents, feeCents }) {
   // ops admin token (SWEEP_SHOPIFY_TOKEN on Railway).
   const token = process.env.SWEEP_SHOPIFY_TOKEN || process.env.SHOPIFY_ACCESS_TOKEN;
   let url = `https://${domain}/admin/api/2024-07/orders.json?status=any&created_at_min=${since}&limit=250`
-    + `&fields=name,created_at,email,subtotal_price,shipping_lines,shipping_address`;
+    + `&fields=name,created_at,email,subtotal_price,shipping_lines,shipping_address,line_items`;
   const flagged = [];
   let scanned = 0;
   for (let page = 0; page < 8 && url; page++) {

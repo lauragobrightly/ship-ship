@@ -4,8 +4,12 @@ const policy = { thresholdCents: 5000, feeCents: 500 };
 
 describe('watchdog overcharge classifier', () => {
   test('single group over threshold charged the fee → flagged', () => {
-    const order = { subtotal_price: '68.00', shipping_lines: [{ title: 'Ships Now', price: '5.00' }] };
-    expect(classifyOrderShipping(order, policy)).toMatch(/single group at \$68.00/);
+    const order = {
+      subtotal_price: '68.00',
+      line_items: [{price: '68.00', quantity: 1, properties: []}],
+      shipping_lines: [{ title: 'Ships Now', code: 'RTS_STD', price: '5.00' }],
+    };
+    expect(classifyOrderShipping(order, policy)).toMatch(/ready-stock pool at \$68.00/);
   });
 
   test('single group under threshold charged the fee → fine', () => {
@@ -13,12 +17,38 @@ describe('watchdog overcharge classifier', () => {
     expect(classifyOrderShipping(order, policy)).toBeNull();
   });
 
-  test('legitimate warehouse split (two $5 lines, $76 order) → fine', () => {
+  test('warehouse split cannot charge the ready-stock pool twice', () => {
     const order = {
       subtotal_price: '76.00',
-      shipping_lines: [{ title: 'Ships Now', price: '5.00' }, { title: 'Ships Later', price: '5.00' }],
+      shipping_lines: [
+        { title: 'Ships Now', code: 'RTS_STD', price: '5.00' },
+        { title: 'Ships Now', code: 'RTS_STD', price: '5.00' },
+      ],
+    };
+    expect(classifyOrderShipping(order, policy)).toMatch(/charged \$10.00 across warehouse groups/);
+  });
+
+  test('one fee for each of the two fulfillment pools is legitimate', () => {
+    const order = {
+      subtotal_price: '68.00',
+      shipping_lines: [
+        {title: 'Ships Now', code: 'RTS_STD', price: '5.00'},
+        {title: 'Pre-Order', code: 'PO_STD', price: '5.00'},
+      ],
     };
     expect(classifyOrderShipping(order, policy)).toBeNull();
+  });
+
+  test('a preorder pool over $50 cannot be charged', () => {
+    const order = {
+      subtotal_price: '76.00',
+      line_items: [{
+        price: '38.00', quantity: 2,
+        properties: [{name: '_shipping_bucket', value: 'preorder'}],
+      }],
+      shipping_lines: [{title: 'Pre-Order', code: 'PO_STD', price: '5.00'}],
+    };
+    expect(classifyOrderShipping(order, policy)).toMatch(/preorder pool at \$76.00/);
   });
 
   test('international orders are exempt from the policy', () => {
