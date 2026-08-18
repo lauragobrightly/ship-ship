@@ -146,3 +146,12 @@ Ship Ship warnings and watchdog results target Wildwoven Slack `#alerts`
 through `COLLIE_ALERT_CHANNEL`. Collie was confirmed as a member before the
 cutover. Revalidation: 60/60 Jest tests and 35/35 production-backed local
 matrix scenarios.
+
+The alert refinement shipped as commit `be99e24`, Railway deployment
+`f7eaf9ca-476f-4e15-bfc2-3f4221dcd085`, image
+`sha256:b22f45fe8b59c8d26f0712f328477f52f39b8abf9c16ff8e9a1c9b6ebbb59f2d`.
+Final verification was 61/61 Jest tests and 35/35 against production. A signed
+`$76 → $68.40` live probe produced no Slack message; a signed `$76 → $49.00`
+threshold-crossing probe produced exactly one labeled warning in `#alerts`.
+Railway showed no HTTP errors. The preceding customer-safe deployment
+`012057ea-0f83-44fb-b23b-172c60a2d439` is the immediate rollback target.
