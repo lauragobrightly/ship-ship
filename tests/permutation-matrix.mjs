@@ -183,8 +183,8 @@ const scenarios = [
 
   // v1 signed (regression — old storefront contract, unchanged semantics)
   { id: 'v1-01-po-over', items: poPool({ version: '1', quantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
-  { id: 'v1-02-po-split-line', items: poPool({ version: '1', quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' }, // v1 cannot survive a split; kept byte-identical deliberately
-  { id: 'v1-03-tampered-pool', items: poPool({ version: '1', quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
+  { id: 'v1-02-po-split-line', items: poPool({ version: '1', quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // v1 cannot survive a split; customer-safe bridge grants free
+  { id: 'v1-03-tampered-pool', items: poPool({ version: '1', quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
 
   // v2 signed (what the storefront deployed 2026-08-12 actually emits)
   { id: 'v2-01-po-over', items: poPool({ quantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
@@ -192,11 +192,11 @@ const scenarios = [
   { id: 'v2-03-po-exactly-50', items: poPool({ quantity: 2, poolCents: 5000, cartCents: 5000 }), orderSubtotal: 5000, expect: 'PO_STD=$0.00' },
   { id: 'v2-04-po-under-anchor', items: poPool({ quantity: 1, poolCents: 3000 }), orderSubtotal: 3000, expect: 'PO_STD=$5.00' },
   { id: 'v2-05-po-under-anchor-elsewhere', items: poPool({ quantity: 1, poolCents: 3000, anchor: false }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' }, // sibling group holds the fee anchor
-  { id: 'v2-06-cb-qty-exceeds-signed', items: poPool({ quantity: 1, callbackQuantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-07-tampered-pool-cents', items: poPool({ quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-08-missing-qty', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_qty: undefined } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-09-wrong-pool-bucket', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_pool: 'ready-stock' } }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
-  { id: 'v2-10-currency-mismatch', items: poPool({ quantity: 2, poolCents: 6000, currency: 'EUR' }), orderSubtotal: 6000, expect: 'PO_STD=$5.00' },
+  { id: 'v2-06-cb-qty-exceeds-signed', items: poPool({ quantity: 1, callbackQuantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
+  { id: 'v2-07-tampered-pool-cents', items: poPool({ quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
+  { id: 'v2-08-missing-qty', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_qty: undefined } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
+  { id: 'v2-09-wrong-pool-bucket', items: poPool({ quantity: 2, poolCents: 6000, tamperFirst: { _ww_ship_pool: 'ready-stock' } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
+  { id: 'v2-10-currency-mismatch', items: poPool({ quantity: 2, poolCents: 6000, currency: 'EUR' }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
   { id: 'v2-11-rts-over', items: rtsPool({ quantity: 2, poolCents: 7600 }), orderSubtotal: 7600, expect: 'RTS_STD=$0.00' },
   { id: 'v2-12-rts-split-line', items: rtsPool({ quantity: 2, callbackQuantity: 1, poolCents: 7600 }), orderSubtotal: 7600, expect: 'RTS_STD=$0.00' },
   {
@@ -226,7 +226,7 @@ const scenarios = [
       ];
     })(),
     orderSubtotal: 6000,
-    expect: 'PO_STD=$5.00',
+    expect: 'PO_STD=$0.00',
   },
   {
     id: 'v2-15-stamped-plus-unstamped-line',

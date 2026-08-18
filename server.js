@@ -415,9 +415,9 @@ function quoteItemLabel(item) {
 /**
  * Log why a signed quote was rejected, then return null.
  *
- * Every rejection here costs the customer the punitive flat $5, so a silent
- * `return null` is an invisible overcharge. The quantity-split defect survived
- * weeks in production precisely because this function had no voice.
+ * Every rejection is surfaced to the customer-safe fallback and Slack alert.
+ * A malformed quote must never recreate per-warehouse charges merely because
+ * the carrier cannot distinguish tampering from a broken checkout contract.
  */
 function rejectSignedQuote(bucket, reason, item) {
   const where = item ? ` [${quoteItemLabel(item)}]` : '';
@@ -598,7 +598,7 @@ export function priceForSignedPool(quote, threshold = appConfig.threshold) {
 }
 
 export function customerSafeFallbackKind(quoteResult, invalidQuote, threshold = appConfig.threshold) {
-  if (invalidQuote) return null;
+  if (invalidQuote) return 'invalid';
   if (!quoteResult) return 'unsigned';
   if (quoteResult.stale) return 'stale';
   if (
@@ -626,6 +626,8 @@ function alertCustomerSafeFallback({bucket, kind, quoteResult, groupSubtotal, su
 
   const reason = kind === 'unsigned'
     ? 'No signed fulfillment-pool metadata reached the carrier.'
+    : kind === 'invalid'
+      ? 'Signed fulfillment-pool metadata failed verification.'
     : kind === 'stale'
       ? quoteResult.reason
       : 'Shopify divided the under-$50 fee-anchor line across warehouse groups.';
@@ -1069,34 +1071,17 @@ app.post('/rates', async (req, res) => {
 //   verified — the signed pool prices the group;
 //   stale    — honest quote, cart moved on (discount code, post-stamp
     //              addition): fail customer-safe at $0;
-//   rejected — tamper-shaped (bad HMAC, inflated qty, two anchors...):
-//              charged the flat fee rather than falling through.
+    //   rejected — malformed or tamper-shaped (bad HMAC, inflated qty, two
+    //              anchors...): fail customer-safe at $0 and alert;
     //   unsigned — accelerated/legacy checkout: fail customer-safe at $0 because
     //              a callback cannot know how many warehouses share its pool.
     const rtsQuote = rtsQuoteResult && !rtsQuoteResult.stale ? rtsQuoteResult : null;
     const preorderQuote = preorderQuoteResult && !preorderQuoteResult.stale ? preorderQuoteResult : null;
-    // Rejection stays deliberately punitive:
-    //
-    //   - the unsigned RTS path qualifies on `order_totals.subtotal_price`,
-    //     which is the WHOLE cart. Falling through on a mixed cart would let
-    //     preorder value buy ready-stock free shipping — the pool leak fixed in
-    //     770d7cd. Failing open here is strictly worse than failing closed.
-    //   - a single callback cannot distinguish "pool is $76 because a sibling
-    //     group holds the other $38" from "poolCents was inflated to $76".
-    //     Comparing poolCents against this group's own item subtotal therefore
-    //     discriminates nothing: a legitimate split presents the same shape as
-    //     the inflation it would be trying to catch. That is the entire reason
-    //     the pool total is signed.
-    //   - the group's own subtotal here is PRE-discount (item.price), while
-    //     poolCents is post-discount, so "this group alone already clears $50"
-    //     is not a sound waiver either — a 50%-off $60 group would be handed
-    //     free shipping it did not earn.
-    //
-    // The quantity-split defect that made this branch fire on honest carts is
-    // fixed at the source (v2 signs `_ww_ship_qty`, not the callback quantity),
-    // and honest staleness (discount codes, post-stamp additions) now fails
-    // customer-safe. What is left is genuinely
-    // tamper-shaped, so it keeps paying the fee — and says so in the logs.
+    // A callback cannot distinguish a malicious quote from a broken/stale
+    // storefront contract while also guaranteeing that physical warehouses
+    // never multiply the fee. During this customer-safe bridge every rejected
+    // quote therefore ships free and alerts; the public Discount Function is
+    // the durable enforcement layer that removes this tradeoff.
     const invalidRtsQuote = rtsItems.length > 0 &&
       hasShippingQuoteMetadata(rtsItems) && !rtsQuoteResult;
     const invalidPreorderQuote = preorderItems.length > 0 &&
@@ -1110,11 +1095,10 @@ app.post('/rates', async (req, res) => {
     if (rtsSubtotal > 0) {
       const signedPrice = priceForSignedPool(rtsQuote);
       if (invalidRtsQuote) {
-        console.warn(`Charging punitive $${appConfig.feeUnderThreshold / 100} on ready-stock: `
-          + `the group carries a signed quote that failed verification (reason logged above). `
+        console.warn(`Invalid ready-stock quote — charging $0 and alerting because warehouse groups cannot price independently. `
           + `Group items subtotal $${rtsSubtotal / 100}.`);
       }
-      const rtsPrice = invalidRtsQuote ? appConfig.feeUnderThreshold : signedPrice ?? 0;
+      const rtsPrice = invalidRtsQuote ? 0 : signedPrice ?? 0;
       const fallbackKind = customerSafeFallbackKind(rtsQuoteResult, invalidRtsQuote);
       alertCustomerSafeFallback({
         bucket: 'ready-stock',
@@ -1140,11 +1124,10 @@ app.post('/rates', async (req, res) => {
     if (preorderSubtotal > 0) {
       const signedPrice = priceForSignedPool(preorderQuote);
       if (invalidPreorderQuote) {
-        console.warn(`Charging punitive $${appConfig.feeUnderThreshold / 100} on preorder: `
-          + `the group carries a signed quote that failed verification (reason logged above). `
+        console.warn(`Invalid preorder quote — charging $0 and alerting because warehouse groups cannot price independently. `
           + `Group items subtotal $${preorderSubtotal / 100}.`);
       }
-      const poPrice = invalidPreorderQuote ? appConfig.feeUnderThreshold : signedPrice ?? 0;
+      const poPrice = invalidPreorderQuote ? 0 : signedPrice ?? 0;
       const fallbackKind = customerSafeFallbackKind(preorderQuoteResult, invalidPreorderQuote);
       alertCustomerSafeFallback({
         bucket: 'preorder',

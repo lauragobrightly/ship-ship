@@ -29,7 +29,10 @@ delivery-group callback.
 - Honest stale or unsigned quote: $0 with a warning. A callback cannot infer the
   pool from its warehouse fragment, so customer-safe undercharging is the only
   non-racy fallback.
-- Invalid signature or tamper-shaped metadata: $5.
+- Invalid signature or tamper-shaped metadata: $0 plus alert. The temporary
+  customer-safe bridge prioritizes preventing warehouse overcharges; the
+  future Shopify Function restores exact enforcement without trusting line
+  metadata.
 - Unclassifiable cart in Hydrogen: checkout returns 503 and asks the customer
   to retry instead of stamping a knowingly wrong pool.
 - Non-US destination: unchanged; Ship Ship returns no rate and defers to
@@ -87,10 +90,26 @@ an internal header so nightly tests do not create incident noise.
 - Candidate live-process matrix: 35/35 scenarios passing.
 - Coordinated Hydrogen quote tests, typecheck, and production build pass.
 
+### Customer-safe cutover amendment
+
+Laura authorized the temporary customer-safe deployment on 2026-08-18. All
+rejected metadata paths now return $0 and alert, including HMAC mismatches,
+inflated quantities, missing signed quantity, currency conflicts, and multiple
+anchors. The earlier punitive $5 branch could still multiply across warehouse
+callbacks, which violates the controlling rule even when the input looks
+tampered. The durable public Shopify Function will restore exact enforcement.
+
+Revalidation after the amendment:
+
+- Carrier Jest suite: 59/59.
+- Local live-process matrix using Railway production credentials and real
+  Batchy classification: 35/35.
+
 ## Rollout
 
-Blocked pending the channel-independent Shop/Shop Pay design above. Once that
-path is implemented and tested:
+The customer-safe bridge is authorized for deployment. It stops customer
+overcharges immediately while accepting monitored undercharges on bypass
+channels until the public Shopify Function is available:
 
 1. Deploy the Hydrogen producer first. Its private attributes are inert while
    the current carrier ignores them.

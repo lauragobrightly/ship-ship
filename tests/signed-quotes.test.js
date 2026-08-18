@@ -199,7 +199,7 @@ describe('signed Hydrogen pool quotes', () => {
     }],
     ['quantity raised above the signed quantity', (quotedItem) => { quotedItem.quantity = 2; }],
     ['changed variant', (quotedItem) => { quotedItem.variant_id = 999; }],
-  ])('%s invalidates the signature and fails closed at $5', async (_name, tamper) => {
+  ])('%s invalidates the signature and fails customer-safe at $0', async (_name, tamper) => {
     const quotedItem = item({
       productId: 601, variantId: 601, price: 2000,
       poolCents: 4000, cartCents: 4000, anchor: false,
@@ -209,7 +209,7 @@ describe('signed Hydrogen pool quotes', () => {
       .post('/rates')
       .send(payload([quotedItem], 4000, `Tamper ${_name}`))
       .expect(200);
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('0');
   });
 
   test('stale cart totals fall back to unsigned pricing, not the punitive fee', async () => {
@@ -351,7 +351,7 @@ describe('customer-safe fallback alerts', () => {
     expect(customerSafeFallbackKind({
       poolCents: 5000, hasAnchor: true, hasCompleteAnchor: true,
     }, false)).toBeNull();
-    expect(customerSafeFallbackKind(null, true)).toBeNull();
+    expect(customerSafeFallbackKind(null, true)).toBe('invalid');
   });
 });
 
@@ -408,7 +408,7 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
     const response = await request(app)
       .post('/rates').send(payload([v1Half], 7600, 'Split v1')).expect(200);
 
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('0');
   });
 
   test('a split preorder line behaves identically', async () => {
@@ -446,7 +446,7 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
     expect(prices.sort()).toEqual([0, 500]);
   });
 
-  test('a callback quantity ABOVE the signed quantity is rejected and fails closed at $5', async () => {
+  test('a callback quantity ABOVE the signed quantity is rejected and fails customer-safe', async () => {
     // A split can only ever shrink a group's quantity. Growth is the inflation
     // the bound exists to catch: 3 units billed against a 1-unit signature.
     const inflated = item({
@@ -458,10 +458,10 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
 
     const response = await request(app)
       .post('/rates').send(payload([inflated], 4000, 'V2 Inflated')).expect(200);
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('0');
   });
 
-  test('a v2 quote with _ww_ship_qty stripped fails closed', async () => {
+  test('a v2 quote with _ww_ship_qty stripped fails customer-safe', async () => {
     const stripped = item({
       version: '2', productId: 807, variantId: 807, price: 2000,
       poolCents: 4000, cartCents: 4000, anchor: false,
@@ -471,10 +471,10 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
 
     const response = await request(app)
       .post('/rates').send(payload([stripped], 4000, 'V2 No Qty')).expect(200);
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('0');
   });
 
-  test('_ww_ship_qty is signed — inflating it to clear the bound fails closed', async () => {
+  test('_ww_ship_qty is signed — inflating it to clear the bound fails customer-safe', async () => {
     const forged = item({
       version: '2', productId: 808, variantId: 808, price: 2000,
       poolCents: 4000, cartCents: 4000, anchor: false,
@@ -485,7 +485,7 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
 
     const response = await request(app)
       .post('/rates').send(payload([forged], 4000, 'V2 Forged Qty')).expect(200);
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('0');
   });
 
   test.each([
@@ -514,7 +514,7 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
       const property = quotedItem.properties.find(({name}) => name === '_ww_ship_v');
       property.value = '3';
     }],
-  ])('v2 %s still fails closed at $5', async (_name, tamper) => {
+  ])('v2 %s fails customer-safe at $0', async (_name, tamper) => {
     const quotedItem = item({
       version: '2', productId: 809, variantId: 809, price: 2000,
       poolCents: 4000, cartCents: 4000, anchor: false,
@@ -525,7 +525,7 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
       .post('/rates')
       .send(payload([quotedItem], 4000, `V2 Tamper ${_name}`))
       .expect(200);
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('0');
   });
 });
 

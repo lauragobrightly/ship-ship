@@ -14,7 +14,9 @@ Wildwoven's Shopify carrier service for ready-to-ship and preorder rates.
   Pre-Order Warehouse remains the fulfillment boundary.
 - Honest stale or missing quote data fails customer-safe at $0 because a single
   callback cannot know whether another warehouse holds the rest of its pool.
-  Invalid HMACs and other tamper-shaped data still fail closed at $5.
+  Invalid HMACs and other malformed/tamper-shaped data fail customer-safe at
+  $0 and alert. This bridge prioritizes never charging a customer for a
+  warehouse split; the future Shopify Function restores exact enforcement.
 - If Shopify divides the fee-anchor line itself between warehouses, no partial
   callback charges it. Hydrogen prefers a quantity-1 anchor to avoid that case.
 - Every customer-safe $0 fallback sends an immediate warning through Collie to
