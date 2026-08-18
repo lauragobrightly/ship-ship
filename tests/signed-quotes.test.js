@@ -343,6 +343,24 @@ describe('customer-safe fallback alerts', () => {
     expect(customerSafeFallbackKind(null, false)).toBe('unsigned');
     expect(customerSafeFallbackKind({stale: true}, false)).toBe('stale');
     expect(customerSafeFallbackKind({
+      stale: true,
+      poolCents: 7600,
+      cartCents: 7600,
+      effectiveOrderSubtotal: 6840,
+    }, false)).toBeNull();
+    expect(customerSafeFallbackKind({
+      stale: true,
+      poolCents: 7600,
+      cartCents: 7600,
+      effectiveOrderSubtotal: 4940,
+    }, false)).toBe('stale');
+    expect(customerSafeFallbackKind({
+      stale: true,
+      poolCents: 6000,
+      cartCents: 9000,
+      effectiveOrderSubtotal: 8100,
+    }, false)).toBe('stale');
+    expect(customerSafeFallbackKind({
       poolCents: 4000, hasAnchor: true, hasCompleteAnchor: false,
     }, false)).toBe('split-anchor');
     expect(customerSafeFallbackKind({
@@ -352,6 +370,27 @@ describe('customer-safe fallback alerts', () => {
       poolCents: 5000, hasAnchor: true, hasCompleteAnchor: true,
     }, false)).toBeNull();
     expect(customerSafeFallbackKind(null, true)).toBe('invalid');
+  });
+
+  test('preserves signed totals on a stale quote so alert policy can judge it', () => {
+    const quotedItem = item({
+      version: '2', productId: 990, variantId: 990, price: 3800, quantity: 2,
+      poolCents: 7600, cartCents: 7600, anchor: true, signedQuantity: 2,
+    });
+    const quote = verifySignedShippingQuote(
+      [quotedItem],
+      'ready-stock',
+      payload([quotedItem], 7600, 'Post-stamp discount', 760).rate,
+      SECRET,
+    );
+    expect(quote).toMatchObject({
+      stale: true,
+      quoteId: 'quote-1',
+      poolCents: 7600,
+      cartCents: 7600,
+      effectiveOrderSubtotal: 6840,
+    });
+    expect(customerSafeFallbackKind(quote, false)).toBeNull();
   });
 });
 

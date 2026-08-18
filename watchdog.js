@@ -11,6 +11,7 @@ import fetch from 'node-fetch';
 
 const ALERT_URL = process.env.COLLIE_ALERT_URL || 'https://collie-production.up.railway.app/alerts/paolo';
 const ALERT_TOKEN = process.env.COLLIE_ALERT_TOKEN || '';
+const ALERT_CHANNEL = process.env.COLLIE_ALERT_CHANNEL || '';
 
 export async function sendAlert({ title, body, severity = 'info', source = 'ship-ship-watchdog' }) {
   if (!ALERT_TOKEN) {
@@ -21,7 +22,13 @@ export async function sendAlert({ title, body, severity = 'info', source = 'ship
     const res = await fetch(ALERT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ALERT_TOKEN}` },
-      body: JSON.stringify({ title, text: body, severity, source }),
+      body: JSON.stringify({
+        title,
+        text: body,
+        severity,
+        source,
+        ...(ALERT_CHANNEL ? {channel: ALERT_CHANNEL} : {}),
+      }),
     });
     if (!res.ok) console.error('[watchdog] alert POST failed:', res.status, await res.text());
   } catch (err) {

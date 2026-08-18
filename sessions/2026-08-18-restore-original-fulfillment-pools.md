@@ -122,3 +122,27 @@ channels until the public Shopify Function is available:
 
 Rollback order is carrier first, then Hydrogen. Record the active Railway
 deployment ID and Oxygen deployment before switching production.
+
+## Production deployment and alert refinement
+
+The bridge went live on 2026-08-18 as Railway deployment
+`012057ea-0f83-44fb-b23b-172c60a2d439`, after Hydrogen/Oxygen was deployed
+first. The production carrier matrix passed 35/35.
+
+Order #36853 then supplied the first real discount-after-stamping example. The
+cart was signed as one $76 ready-stock pool; `WILDINSIDERS` reduced it to
+$68.40 inside hosted checkout. Ship Ship correctly returned one free RTS rate,
+but the conservative stale-quote rule also warned Slack even though both totals
+were safely above $50.
+
+The alert policy now suppresses only that provably legitimate shape: signed
+cart equals signed pool, and both the signed pool and Shopify's newer
+post-discount total remain at or above $50. It still warns when a discount may
+cross the threshold, when the signed cart contains multiple pools, or when
+metadata is missing, invalid, or split. Stale results retain quote ID and pool
+totals for useful diagnostics.
+
+Ship Ship warnings and watchdog results target Wildwoven Slack `#alerts`
+through `COLLIE_ALERT_CHANNEL`. Collie was confirmed as a member before the
+cutover. Revalidation: 60/60 Jest tests and 35/35 production-backed local
+matrix scenarios.

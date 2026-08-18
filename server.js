@@ -446,10 +446,10 @@ function rejectSignedQuote(bucket, reason, item) {
  */
 export const STALE_QUOTE = Object.freeze({stale: true});
 
-function staleSignedQuote(bucket, reason, item) {
+function staleSignedQuote(bucket, reason, item, quote = {}) {
   const where = item ? ` [${quoteItemLabel(item)}]` : '';
   console.warn(`Signed ${bucket} quote stale — ${reason}${where} — failing customer-safe at $0`);
-  return {...STALE_QUOTE, reason};
+  return {...STALE_QUOTE, ...quote, reason};
 }
 
 /**
@@ -572,6 +572,8 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
     return staleSignedQuote(
       bucket,
       `signed cart total ${common.cartCents} does not match Shopify post-discount subtotal ${effectiveOrderSubtotal === null ? '(absent/malformed)' : effectiveOrderSubtotal} — cart changed after stamping`,
+      null,
+      {...common, effectiveOrderSubtotal},
     );
   }
   if (rateCurrency && rateCurrency !== common.currency) {
@@ -600,7 +602,21 @@ export function priceForSignedPool(quote, threshold = appConfig.threshold) {
 export function customerSafeFallbackKind(quoteResult, invalidQuote, threshold = appConfig.threshold) {
   if (invalidQuote) return 'invalid';
   if (!quoteResult) return 'unsigned';
-  if (quoteResult.stale) return 'stale';
+  if (quoteResult.stale) {
+    // A discount applied inside hosted checkout legitimately changes the cart
+    // total after Hydrogen stamps it. When the signed cart contained exactly
+    // this one pool and both the signed pool and Shopify's newer post-discount
+    // total still clear $50, free shipping is certain—not a safety waiver.
+    // Stay silent. Mixed carts and threshold crossings remain alert-worthy
+    // because a carrier callback cannot allocate Shopify's cart-wide discount
+    // back to each fulfillment pool.
+    const singlePoolCart = quoteResult.poolCents === quoteResult.cartCents;
+    const stillQualifies = Number.isFinite(quoteResult.poolCents)
+      && quoteResult.poolCents >= threshold
+      && Number.isFinite(quoteResult.effectiveOrderSubtotal)
+      && quoteResult.effectiveOrderSubtotal >= threshold;
+    return singlePoolCart && stillQualifies ? null : 'stale';
+  }
   if (
     quoteResult.poolCents < threshold &&
     quoteResult.hasAnchor &&

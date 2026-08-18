@@ -19,8 +19,12 @@ Wildwoven's Shopify carrier service for ready-to-ship and preorder rates.
   warehouse split; the future Shopify Function restores exact enforcement.
 - If Shopify divides the fee-anchor line itself between warehouses, no partial
   callback charges it. Hydrogen prefers a quantity-1 anchor to avoid that case.
-- Every customer-safe $0 fallback sends an immediate warning through Collie to
-  Slack. Identical quote/reason alerts are deduplicated for 15 minutes.
+- Customer-safe $0 fallbacks send warnings through Collie to the configured
+  Slack channel. A single-pool cart stays silent when a checkout-applied
+  discount changes the signed total but both the old and new totals remain at
+  or above $50; free shipping is certain in that case. Missing/invalid data,
+  mixed-cart ambiguity, and threshold crossings still alert. Identical
+  quote/reason alerts are deduplicated for 15 minutes.
 - International orders defer to Shopify's native rates.
 
 Shopify can call `/rates` once per fulfillment group. A callback cannot see its
@@ -55,6 +59,7 @@ those groups to one fee.
 - `BATCHY_URL`
 - `COLLIE_ALERT_TOKEN`
 - `COLLIE_ALERT_URL` (optional; defaults to Collie production)
+- `COLLIE_ALERT_CHANNEL` (optional Slack channel ID; production uses `#alerts`)
 
 `BATCHY_API_KEY` must match Hydrogen's production value because it also signs
 and verifies the private shipping quote.
