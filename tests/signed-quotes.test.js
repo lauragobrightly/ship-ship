@@ -494,10 +494,9 @@ describe('discount codes do not waive the under-$50 fee', () => {
     expect(priceForSignedPool(quote)).toBe(0);
   });
 
-  test('a mixed cart keeps the signed pool value because the discount cannot be allocated', () => {
-    // Pool is $30 of an $80 cart. A cart-wide discount cannot be split back
-    // into pools by a carrier callback, so the signed pre-discount pool value
-    // stands and the pool still pays its fee.
+  test('a mixed cart allocates the discount pro-rata across pools', () => {
+    // Pool is $30 of an $80 cart with 10% off. The pool's share of the $8
+    // discount is $3, so it is worth $27 — still under $50, still pays.
     const line = item({
       version: '2', productId: 557, variantId: 557, price: 3000, quantity: 1,
       signedQuantity: 1, poolCents: 3000, cartCents: 8000, anchor: true,
@@ -508,7 +507,61 @@ describe('discount codes do not waive the under-$50 fee', () => {
       SECRET,
     );
     expect(quote.stale).toBeUndefined();
-    expect(quote.effectivePoolCents).toBe(3000);
+    expect(quote.effectivePoolCents).toBe(2700);
+    expect(priceForSignedPool(quote)).toBe(500);
+  });
+
+  test('mixed $60 + $60 at 20% off charges both pools instead of shipping both free', () => {
+    // The gap left open by the single-pool-only allocation: each pool is $60
+    // pre-discount but $48 paid, so each owes the fee. Previously both free.
+    const rts = item({
+      version: '2', productId: 601, variantId: 601, price: 6000, quantity: 1,
+      signedQuantity: 1, bucket: 'ready-stock', poolCents: 6000, cartCents: 12000, anchor: true,
+    });
+    const po = item({
+      version: '2', productId: 602, variantId: 602, price: 6000, quantity: 1,
+      signedQuantity: 1, bucket: 'preorder', poolCents: 6000, cartCents: 12000, anchor: true,
+    });
+    const rtsQuote = verifySignedShippingQuote([rts], 'ready-stock', payload([rts], 12000, 'Mixed 60/60 RTS', 2400).rate, SECRET);
+    const poQuote = verifySignedShippingQuote([po], 'preorder', payload([po], 12000, 'Mixed 60/60 PO', 2400).rate, SECRET);
+    expect(rtsQuote.effectivePoolCents).toBe(4800);
+    expect(poQuote.effectivePoolCents).toBe(4800);
+    expect(priceForSignedPool(rtsQuote)).toBe(500);
+    expect(priceForSignedPool(poQuote)).toBe(500);
+  });
+
+  test('mixed cart where only one pool crosses the threshold charges only that pool', () => {
+    // $60 RTS + $40 PO = $100, 10% off. RTS -> $54 (free), PO -> $36 (pays).
+    const rts = item({
+      version: '2', productId: 603, variantId: 603, price: 6000, quantity: 1,
+      signedQuantity: 1, bucket: 'ready-stock', poolCents: 6000, cartCents: 10000, anchor: true,
+    });
+    const po = item({
+      version: '2', productId: 604, variantId: 604, price: 4000, quantity: 1,
+      signedQuantity: 1, bucket: 'preorder', poolCents: 4000, cartCents: 10000, anchor: true,
+    });
+    const rtsQuote = verifySignedShippingQuote([rts], 'ready-stock', payload([rts], 10000, 'Mixed 60/40 RTS', 1000).rate, SECRET);
+    const poQuote = verifySignedShippingQuote([po], 'preorder', payload([po], 10000, 'Mixed 60/40 PO', 1000).rate, SECRET);
+    expect(rtsQuote.effectivePoolCents).toBe(5400);
+    expect(poQuote.effectivePoolCents).toBe(3600);
+    expect(priceForSignedPool(rtsQuote)).toBe(0);
+    expect(priceForSignedPool(poQuote)).toBe(500);
+  });
+
+  test('a discount already in the cart at stamping is not double-counted in a mixed cart', () => {
+    // Signed values are post-discount already ($27 pool of a $72 cart). The
+    // allocation must not subtract the discount a second time.
+    const line = item({
+      version: '2', productId: 605, variantId: 605, price: 2700, quantity: 1,
+      signedQuantity: 1, poolCents: 2700, cartCents: 7200, anchor: true,
+    });
+    const quote = verifySignedShippingQuote(
+      [line], 'ready-stock',
+      payload([line], 8000, 'Pre-stamped mixed', 800).rate,
+      SECRET,
+    );
+    expect(quote.stale).toBeUndefined();
+    expect(quote.effectivePoolCents).toBe(2700);
     expect(priceForSignedPool(quote)).toBe(500);
   });
 });

@@ -251,6 +251,37 @@ const scenarios = [
   { id: 's06-code-typed-in-checkout-over', items: rtsPool({ quantity: 2, poolCents: 7600, cartCents: 7600 }), orderSubtotal: 7600, discountAmount: 760, expect: 'RTS_STD=$0.00' },
   { id: 's07-code-crosses-threshold-down', items: poPool({ quantity: 2, poolCents: 5600, cartCents: 5600 }), orderSubtotal: 5600, discountAmount: 1680, expect: 'PO_STD=$5.00' },
 
+  // Mixed RTS + preorder with a checkout-entered discount. The cart-wide
+  // discount is allocated to each pool in proportion to its share, which is
+  // exact for a percentage discount.
+  {
+    id: 'm01-mixed-60-60-20pct-both-cross-down',
+    items: [
+      ...rtsPool({ quantity: 2, poolCents: 6000, cartCents: 12000 }),
+      ...poPool({ quantity: 2, poolCents: 6000, cartCents: 12000 }),
+    ],
+    orderSubtotal: 12000, discountAmount: 2400,
+    expect: 'PO_STD=$5.00 RTS_STD=$5.00',
+  },
+  {
+    id: 'm02-mixed-60-40-10pct-only-po-crosses',
+    items: [
+      ...rtsPool({ quantity: 2, poolCents: 6000, cartCents: 10000 }),
+      ...poPool({ quantity: 2, poolCents: 4000, cartCents: 10000 }),
+    ],
+    orderSubtotal: 10000, discountAmount: 1000,
+    expect: 'PO_STD=$5.00 RTS_STD=$0.00',
+  },
+  {
+    id: 'm03-mixed-no-discount-unchanged',
+    items: [
+      ...rtsPool({ quantity: 2, poolCents: 6000, cartCents: 12000 }),
+      ...poPool({ quantity: 2, poolCents: 6000, cartCents: 12000 }),
+    ],
+    orderSubtotal: 12000,
+    expect: 'PO_STD=$0.00 RTS_STD=$0.00',
+  },
+
   // Cross-group combining (two concurrent callbacks, same destination)
   {
     id: 'x01-po-cross-group-combine',
