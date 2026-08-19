@@ -242,6 +242,15 @@ const scenarios = [
   { id: 's03-discount-code-po-under', items: poPool({ quantity: 1, poolCents: 2700, cartCents: 2700 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$5.00' },
   { id: 's04-stale-customer-safe', items: poPool({ quantity: 1, poolCents: 7600, cartCents: 7600 }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' },
 
+  // s01-s03 sign the POST-discount total, i.e. a discount Hydrogen already saw
+  // in the cart. The real leak was the other path: the customer types the code
+  // into hosted Shopify checkout AFTER Hydrogen stamped, so the signed total is
+  // PRE-discount and can never equal Shopify's post-discount subtotal.
+  // Orders #36872 / #36879 on 2026-08-19 are s05.
+  { id: 's05-code-typed-in-checkout-under', items: poPool({ quantity: 1, poolCents: 3000, cartCents: 3000 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$5.00' },
+  { id: 's06-code-typed-in-checkout-over', items: rtsPool({ quantity: 2, poolCents: 7600, cartCents: 7600 }), orderSubtotal: 7600, discountAmount: 760, expect: 'RTS_STD=$0.00' },
+  { id: 's07-code-crosses-threshold-down', items: poPool({ quantity: 2, poolCents: 5600, cartCents: 5600 }), orderSubtotal: 5600, discountAmount: 1680, expect: 'PO_STD=$5.00' },
+
   // Cross-group combining (two concurrent callbacks, same destination)
   {
     id: 'x01-po-cross-group-combine',

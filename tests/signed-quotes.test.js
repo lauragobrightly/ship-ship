@@ -372,7 +372,10 @@ describe('customer-safe fallback alerts', () => {
     expect(customerSafeFallbackKind(null, true)).toBe('invalid');
   });
 
-  test('preserves signed totals on a stale quote so alert policy can judge it', () => {
+  test('a discount typed into hosted checkout is not staleness', () => {
+    // Hydrogen stamped the pre-discount total (7600). The customer then
+    // entered a 10% code in hosted checkout, so Shopify reports 7600 pre and
+    // 6840 post. The cart itself never changed, so the quote must stand.
     const quotedItem = item({
       version: '2', productId: 990, variantId: 990, price: 3800, quantity: 2,
       poolCents: 7600, cartCents: 7600, anchor: true, signedQuantity: 2,
@@ -383,14 +386,130 @@ describe('customer-safe fallback alerts', () => {
       payload([quotedItem], 7600, 'Post-stamp discount', 760).rate,
       SECRET,
     );
+    expect(quote.stale).toBeUndefined();
+    expect(quote).toMatchObject({
+      quoteId: 'quote-1',
+      poolCents: 7600,
+      cartCents: 7600,
+      effectiveOrderSubtotal: 6840,
+      effectivePoolCents: 6840,
+    });
+    // Still over $50 after the discount, so free is correct and silent.
+    expect(priceForSignedPool(quote)).toBe(0);
+    expect(customerSafeFallbackKind(quote, false)).toBeNull();
+  });
+
+  test('a genuine post-stamp cart change is still stale and keeps its totals', () => {
+    // Signed at 7600; Shopify now reports a 5000 cart with no discount. That
+    // matches neither the pre- nor the post-discount figure: the cart changed.
+    const quotedItem = item({
+      version: '2', productId: 991, variantId: 991, price: 3800, quantity: 2,
+      poolCents: 7600, cartCents: 7600, anchor: true, signedQuantity: 2,
+    });
+    const quote = verifySignedShippingQuote(
+      [quotedItem],
+      'ready-stock',
+      payload([quotedItem], 5000, 'Line removed after stamping', 0).rate,
+      SECRET,
+    );
     expect(quote).toMatchObject({
       stale: true,
       quoteId: 'quote-1',
       poolCents: 7600,
       cartCents: 7600,
-      effectiveOrderSubtotal: 6840,
+      effectiveOrderSubtotal: 5000,
     });
-    expect(customerSafeFallbackKind(quote, false)).toBeNull();
+    expect(priceForSignedPool(quote)).toBe(0);
+  });
+});
+
+/**
+ * Regression cover for the 2026-08-19 incident: orders #36872 and #36879, a
+ * single $30 Smaug Lovey with WILDINSIDERS (10% off), shipped free. Commit
+ * b70e7f2 made a stale quote ship free, and comparing the signed pre-discount
+ * total against Shopify's post-discount subtotal marked every discounted
+ * checkout stale — so any under-$50 cart with a code shipped for $0.
+ */
+describe('discount codes do not waive the under-$50 fee', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('the exact incident: $30 cart + 10% code still pays $5', async () => {
+    const smaug = item({
+      version: '2', productId: 8797164667032, variantId: 46875982954648,
+      price: 3000, quantity: 1, signedQuantity: 1,
+      poolCents: 3000, cartCents: 3000, anchor: true,
+    });
+    const res = await request(app)
+      .post('/rates')
+      .send(payload([smaug], 3000, 'Incident 36872', 300))
+      .expect(200);
+    expect(res.body.rates).toHaveLength(1);
+    expect(res.body.rates[0].total_price).toBe('500');
+  });
+
+  test('the same cart with no discount code is unchanged at $5', async () => {
+    const smaug = item({
+      version: '2', productId: 8797164667032, variantId: 46875982954648,
+      price: 3000, quantity: 1, signedQuantity: 1,
+      poolCents: 3000, cartCents: 3000, anchor: true,
+    });
+    const res = await request(app)
+      .post('/rates')
+      .send(payload([smaug], 3000, 'Control 36870', 0))
+      .expect(200);
+    expect(res.body.rates[0].total_price).toBe('500');
+  });
+
+  test('a discount that drops a single-pool cart under $50 starts charging', () => {
+    // $56 signed, 30% off -> $39.20 actually paid. The customer is under the
+    // threshold on the money that changed hands, so the fee applies.
+    const line = item({
+      version: '2', productId: 555, variantId: 555, price: 5600, quantity: 1,
+      signedQuantity: 1, poolCents: 5600, cartCents: 5600, anchor: true,
+    });
+    const quote = verifySignedShippingQuote(
+      [line], 'ready-stock',
+      payload([line], 5600, 'Threshold crossing', 1680).rate,
+      SECRET,
+    );
+    expect(quote.stale).toBeUndefined();
+    expect(quote.effectivePoolCents).toBe(3920);
+    expect(priceForSignedPool(quote)).toBe(500);
+  });
+
+  test('a discount already in the Hydrogen cart at stamping time still verifies', () => {
+    // Here Hydrogen saw the discount, so the signed total is already the
+    // post-discount figure. It must match the post-discount side instead.
+    const line = item({
+      version: '2', productId: 556, variantId: 556, price: 6840, quantity: 1,
+      signedQuantity: 1, poolCents: 6840, cartCents: 6840, anchor: true,
+    });
+    const quote = verifySignedShippingQuote(
+      [line], 'ready-stock',
+      payload([line], 7600, 'Pre-stamp discount', 760).rate,
+      SECRET,
+    );
+    expect(quote.stale).toBeUndefined();
+    expect(quote.effectivePoolCents).toBe(6840);
+    expect(priceForSignedPool(quote)).toBe(0);
+  });
+
+  test('a mixed cart keeps the signed pool value because the discount cannot be allocated', () => {
+    // Pool is $30 of an $80 cart. A cart-wide discount cannot be split back
+    // into pools by a carrier callback, so the signed pre-discount pool value
+    // stands and the pool still pays its fee.
+    const line = item({
+      version: '2', productId: 557, variantId: 557, price: 3000, quantity: 1,
+      signedQuantity: 1, poolCents: 3000, cartCents: 8000, anchor: true,
+    });
+    const quote = verifySignedShippingQuote(
+      [line], 'ready-stock',
+      payload([line], 8000, 'Mixed cart', 800).rate,
+      SECRET,
+    );
+    expect(quote.stale).toBeUndefined();
+    expect(quote.effectivePoolCents).toBe(3000);
+    expect(priceForSignedPool(quote)).toBe(500);
   });
 });
 

@@ -558,20 +558,37 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
   if (anchorCount > 1) {
     return rejectSignedQuote(bucket, `${anchorCount} anchor lines in one delivery group, expected at most 1`);
   }
-  // Hydrogen signs the post-discount Storefront subtotal. Shopify documents
-  // carrier `subtotal_price` as pre-discount and supplies `discount_amount`
-  // separately, so compare against their difference. A remaining mismatch is
-  // honest staleness (for example a line changed after stamping), not tampering.
+  // Hydrogen stamps `_ww_ship_cart_cents` from `cart.cost.subtotalAmount` at
+  // cart mutation and again synchronously at /checkout. A discount code the
+  // customer types into hosted Shopify checkout is entered AFTER both of those
+  // moments, so Hydrogen never sees it and the signed total stays pre-discount.
+  // Shopify documents carrier `subtotal_price` as pre-discount and supplies
+  // `discount_amount` separately, so one unchanged cart can legitimately
+  // present as either figure depending on when it was stamped:
+  //
+  //   discount already in the Hydrogen cart -> signed total is post-discount;
+  //   discount typed into hosted checkout   -> signed total is pre-discount.
+  //
+  // Accept either. A cart that genuinely changed after stamping — a line added,
+  // removed, or re-quantified — matches NEITHER, so the freshness guarantee is
+  // unchanged; only the false positive goes away.
+  //
+  // Comparing solely against the post-discount figure made every discounted
+  // checkout stale, and since b70e7f2 a stale quote ships free. That is why
+  // under-$50 carts with a discount code began shipping for $0 on 2026-08-18.
   const orderSubtotal = parseUnsignedInteger(rate?.order_totals?.subtotal_price);
   const orderDiscount = parseUnsignedInteger(rate?.order_totals?.discount_amount ?? 0);
   const effectiveOrderSubtotal = orderSubtotal !== null && orderDiscount !== null
     ? Math.max(0, orderSubtotal - orderDiscount)
     : null;
+  const acceptedCartTotals = [orderSubtotal, effectiveOrderSubtotal].filter((v) => v !== null);
   const rateCurrency = String(rate?.currency ?? '').toUpperCase();
-  if (effectiveOrderSubtotal === null || effectiveOrderSubtotal !== common.cartCents) {
+  if (!acceptedCartTotals.includes(common.cartCents)) {
     return staleSignedQuote(
       bucket,
-      `signed cart total ${common.cartCents} does not match Shopify post-discount subtotal ${effectiveOrderSubtotal === null ? '(absent/malformed)' : effectiveOrderSubtotal} — cart changed after stamping`,
+      `signed cart total ${common.cartCents} matches neither Shopify's pre-discount subtotal `
+        + `${orderSubtotal === null ? '(absent/malformed)' : orderSubtotal} nor its post-discount subtotal `
+        + `${effectiveOrderSubtotal === null ? '(absent/malformed)' : effectiveOrderSubtotal} — cart changed after stamping`,
       null,
       {...common, effectiveOrderSubtotal},
     );
@@ -580,8 +597,21 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
     return rejectSignedQuote(bucket, `signed currency ${common.currency} does not match rate currency ${rateCurrency}`);
   }
 
+  // When the signed cart contained exactly this one pool, any cart-wide
+  // discount belongs entirely to this pool, so Shopify's post-discount
+  // subtotal IS this pool's post-discount value and can safely drive the $50
+  // threshold. That is the only case a carrier callback can allocate; a mixed
+  // cart cannot be split back into pools here, so it keeps the signed
+  // (pre-discount) pool value and stays alert-worthy.
+  const singlePoolCart = common.poolCents === common.cartCents;
+  const effectivePoolCents = singlePoolCart && effectiveOrderSubtotal !== null
+    ? effectiveOrderSubtotal
+    : common.poolCents;
+
   return {
     ...common,
+    effectiveOrderSubtotal,
+    effectivePoolCents,
     hasAnchor: anchorCount === 1,
     // A quantity-split line copies its anchor into more than one warehouse
     // callback. No callback may charge it unless that callback contains the
@@ -593,7 +623,11 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
 export function priceForSignedPool(quote, threshold = appConfig.threshold) {
   if (!quote) return null;
   if (quote.stale) return 0;
-  if (quote.poolCents >= threshold) return 0;
+  // Price the pool on what the customer actually pays. `effectivePoolCents`
+  // is the post-discount value for a single-pool cart and falls back to the
+  // signed pre-discount value when the discount cannot be attributed.
+  const poolValue = quote.effectivePoolCents ?? quote.poolCents;
+  if (poolValue >= threshold) return 0;
   return (quote.hasCompleteAnchor ?? quote.hasAnchor)
     ? appConfig.feeUnderThreshold
     : 0;
