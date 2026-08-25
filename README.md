@@ -9,7 +9,7 @@ Wildwoven's Shopify carrier service for ready-to-ship and preorder rates.
   anchor.
 - Ship Ship Hooray verifies those signatures with the shared Batchy credential.
   Pools at or above $50 are free. Below $50, only the group containing the
-  signed anchor costs $5, even when Shopify splits the pool across locations.
+  signed anchor costs $6.99, even when Shopify splits the pool across locations.
 - Ready-stock and preorder pools always qualify independently. The virtual
   Pre-Order Warehouse remains the fulfillment boundary.
 - Honest stale or missing quote data fails customer-safe at $0 because a single

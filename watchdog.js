@@ -126,7 +126,7 @@ function lineItemCents(item) {
 }
 
 // Pure classifier so it can be unit-tested. Physical Shopify delivery groups
-// are not economic pools. Ready-stock may contribute at most one $5 charge and
+// are not economic pools. Ready-stock may contribute at most one $6.99 charge and
 // preorder may contribute at most one; either pool is free at $50.
 export function classifyOrderShipping(order, { thresholdCents, feeCents }) {
   // Policy governs US shipments only; international rates legitimately exceed

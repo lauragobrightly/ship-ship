@@ -1,6 +1,6 @@
 import { classifyOrderShipping, msUntilPT } from '../watchdog.js';
 
-const policy = { thresholdCents: 5000, feeCents: 500 };
+const policy = { thresholdCents: 5000, feeCents: 699 };
 
 describe('watchdog overcharge classifier', () => {
   test('single group over threshold charged the fee → flagged', () => {

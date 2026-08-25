@@ -139,7 +139,7 @@ describe('signed Hydrogen pool quotes', () => {
     expect(second.body.rates[0].total_price).toBe('0');
   });
 
-  test('a split $40 pool charges exactly one $5 fee', async () => {
+  test('a split $40 pool charges exactly one $6.99 fee', async () => {
     const anchor = item({
       productId: 301, variantId: 301, price: 2000,
       poolCents: 4000, cartCents: 4000, anchor: true,
@@ -154,8 +154,8 @@ describe('signed Hydrogen pool quotes', () => {
       request(app).post('/rates').send(payload([sibling], 4000, 'D')).expect(200),
     ]);
     const prices = [first, second].map((response) => Number(response.body.rates[0].total_price));
-    expect(prices.reduce((sum, price) => sum + price, 0)).toBe(500);
-    expect(prices.sort()).toEqual([0, 500]);
+    expect(prices.reduce((sum, price) => sum + price, 0)).toBe(699);
+    expect(prices.sort()).toEqual([0, 699]);
   });
 
   test('mixed $30 ready-stock and $60 preorder pools qualify independently', async () => {
@@ -173,7 +173,7 @@ describe('signed Hydrogen pool quotes', () => {
       request(app).post('/rates').send(payload([preorder], 9000, 'F')).expect(200),
     ]);
 
-    expect(readyResponse.body.rates[0]).toMatchObject({service_code: 'RTS_STD', total_price: '500'});
+    expect(readyResponse.body.rates[0]).toMatchObject({service_code: 'RTS_STD', total_price: '699'});
     expect(preorderResponse.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
   });
 
@@ -232,7 +232,7 @@ describe('signed Hydrogen pool quotes', () => {
     // The production incident of 2026-08-06..13. A 10% code makes Hydrogen
     // sign cartCents 5400 while Shopify's callback reports the pre-discount
     // 6000. Two $30 preorder items — $60 of preorder, "Free over $50" — were
-    // billed the punitive $5 on every such cart.
+    // billed the punitive $6.99 on every such cart.
     const quotedItem = item({
       productId: 801, variantId: 801, price: 3000, quantity: 2,
       bucket: 'preorder', poolCents: 5400, cartCents: 5400, anchor: true,
@@ -256,7 +256,7 @@ describe('signed Hydrogen pool quotes', () => {
       .post('/rates')
       .send(payload([quotedItem], 4000, 'Discount Under Threshold', 400))
       .expect(200);
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('699');
   });
 
   test('a discounted pool at exactly $50 ships free', async () => {
@@ -325,9 +325,9 @@ describe('signed Hydrogen pool quotes', () => {
             const preorderFees = Array.from({length: preorderLocations}, (_, index) =>
               priceForSignedPool({poolCents: preorderTotal, hasAnchor: index === 0}));
             expect(readyFees.reduce((sum, fee) => sum + fee, 0))
-              .toBe(readyTotal >= 5000 ? 0 : 500);
+              .toBe(readyTotal >= 5000 ? 0 : 699);
             expect(preorderFees.reduce((sum, fee) => sum + fee, 0))
-              .toBe(preorderTotal >= 5000 ? 0 : 500);
+              .toBe(preorderTotal >= 5000 ? 0 : 699);
             cases++;
           }
         }
@@ -433,7 +433,7 @@ describe('customer-safe fallback alerts', () => {
 describe('discount codes do not waive the under-$50 fee', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('the exact incident: $30 cart + 10% code still pays $5', async () => {
+  test('the exact incident: $30 cart + 10% code still pays $6.99', async () => {
     const smaug = item({
       version: '2', productId: 8797164667032, variantId: 46875982954648,
       price: 3000, quantity: 1, signedQuantity: 1,
@@ -444,10 +444,10 @@ describe('discount codes do not waive the under-$50 fee', () => {
       .send(payload([smaug], 3000, 'Incident 36872', 300))
       .expect(200);
     expect(res.body.rates).toHaveLength(1);
-    expect(res.body.rates[0].total_price).toBe('500');
+    expect(res.body.rates[0].total_price).toBe('699');
   });
 
-  test('the same cart with no discount code is unchanged at $5', async () => {
+  test('the same cart with no discount code is unchanged at $6.99', async () => {
     const smaug = item({
       version: '2', productId: 8797164667032, variantId: 46875982954648,
       price: 3000, quantity: 1, signedQuantity: 1,
@@ -457,7 +457,7 @@ describe('discount codes do not waive the under-$50 fee', () => {
       .post('/rates')
       .send(payload([smaug], 3000, 'Control 36870', 0))
       .expect(200);
-    expect(res.body.rates[0].total_price).toBe('500');
+    expect(res.body.rates[0].total_price).toBe('699');
   });
 
   test('a discount that drops a single-pool cart under $50 starts charging', () => {
@@ -474,7 +474,7 @@ describe('discount codes do not waive the under-$50 fee', () => {
     );
     expect(quote.stale).toBeUndefined();
     expect(quote.effectivePoolCents).toBe(3920);
-    expect(priceForSignedPool(quote)).toBe(500);
+    expect(priceForSignedPool(quote)).toBe(699);
   });
 
   test('a discount already in the Hydrogen cart at stamping time still verifies', () => {
@@ -508,7 +508,7 @@ describe('discount codes do not waive the under-$50 fee', () => {
     );
     expect(quote.stale).toBeUndefined();
     expect(quote.effectivePoolCents).toBe(2700);
-    expect(priceForSignedPool(quote)).toBe(500);
+    expect(priceForSignedPool(quote)).toBe(699);
   });
 
   test('mixed $60 + $60 at 20% off charges both pools instead of shipping both free', () => {
@@ -526,8 +526,8 @@ describe('discount codes do not waive the under-$50 fee', () => {
     const poQuote = verifySignedShippingQuote([po], 'preorder', payload([po], 12000, 'Mixed 60/60 PO', 2400).rate, SECRET);
     expect(rtsQuote.effectivePoolCents).toBe(4800);
     expect(poQuote.effectivePoolCents).toBe(4800);
-    expect(priceForSignedPool(rtsQuote)).toBe(500);
-    expect(priceForSignedPool(poQuote)).toBe(500);
+    expect(priceForSignedPool(rtsQuote)).toBe(699);
+    expect(priceForSignedPool(poQuote)).toBe(699);
   });
 
   test('mixed cart where only one pool crosses the threshold charges only that pool', () => {
@@ -545,7 +545,7 @@ describe('discount codes do not waive the under-$50 fee', () => {
     expect(rtsQuote.effectivePoolCents).toBe(5400);
     expect(poQuote.effectivePoolCents).toBe(3600);
     expect(priceForSignedPool(rtsQuote)).toBe(0);
-    expect(priceForSignedPool(poQuote)).toBe(500);
+    expect(priceForSignedPool(poQuote)).toBe(699);
   });
 
   test('a discount already in the cart at stamping is not double-counted in a mixed cart', () => {
@@ -562,7 +562,7 @@ describe('discount codes do not waive the under-$50 fee', () => {
     );
     expect(quote.stale).toBeUndefined();
     expect(quote.effectivePoolCents).toBe(2700);
-    expect(priceForSignedPool(quote)).toBe(500);
+    expect(priceForSignedPool(quote)).toBe(699);
   });
 });
 
@@ -653,8 +653,8 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
       request(app).post('/rates').send(payload([sibling], 4000, 'V2 Under B')).expect(200),
     ]);
     const prices = [first, second].map((response) => Number(response.body.rates[0].total_price));
-    expect(prices.reduce((sum, price) => sum + price, 0)).toBe(500);
-    expect(prices.sort()).toEqual([0, 500]);
+    expect(prices.reduce((sum, price) => sum + price, 0)).toBe(699);
+    expect(prices.sort()).toEqual([0, 699]);
   });
 
   test('a callback quantity ABOVE the signed quantity is rejected and fails customer-safe', async () => {
@@ -773,7 +773,7 @@ describe('v1 and v2 coexist during the rollout window', () => {
       request(app).post('/rates').send(payload([sibling], 4000, 'Legacy Under B')).expect(200),
     ]);
     const prices = [first, second].map((response) => Number(response.body.rates[0].total_price));
-    expect(prices.sort()).toEqual([0, 500]);
+    expect(prices.sort()).toEqual([0, 699]);
   });
 
   test('v1 and v2 lines in the same delivery group agree on one pool and price once', async () => {
@@ -791,7 +791,7 @@ describe('v1 and v2 coexist during the rollout window', () => {
 
     const response = await request(app)
       .post('/rates').send(payload([v1Line, v2Line], 4000, 'Mixed Versions')).expect(200);
-    expect(response.body.rates[0].total_price).toBe('500');
+    expect(response.body.rates[0].total_price).toBe('699');
   });
 
   test('a v2 quote verifies with the same helper the v1 path uses', () => {

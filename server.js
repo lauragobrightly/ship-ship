@@ -122,7 +122,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // App configuration (in production, store in database)
 const appConfig = {
   threshold: 5000, // $50 in cents
-  feeUnderThreshold: 500, // $5 in cents
+  feeUnderThreshold: 699, // $6.99 in cents
   labels: {
     rts: "Ships Now (In-Stock)",
     po: "Ships Later (Pre-Order)",

@@ -67,12 +67,12 @@ describe('Shipping Rates API', () => {
     defaultAddress = `Test ${expect.getState().currentTestName}`;
   });
 
-  test('RTS $30 → "Ships Now" $5', async () => {
+  test('RTS $30 → "Ships Now" $6.99', async () => {
     const items = [{
       name: "Test Product",
       sku: "TEST-SKU",
       quantity: 1,
-      grams: 500,
+      grams: 699,
       price: 3000,
       vendor: "Test Vendor",
       requires_shipping: true,
@@ -101,7 +101,7 @@ describe('Shipping Rates API', () => {
       name: "Test Product",
       sku: "TEST-SKU", 
       quantity: 1,
-      grams: 500,
+      grams: 699,
       price: 6000,
       vendor: "Test Vendor",
       requires_shipping: true,
@@ -129,7 +129,7 @@ describe('Shipping Rates API', () => {
       name: "LOTR Zip Romper",
       sku: "ZIP-LOTR",
       quantity: 1,
-      grams: 500,
+      grams: 699,
       price: 3000,
       vendor: "Wildwoven",
       requires_shipping: true,
@@ -166,7 +166,7 @@ describe('Shipping Rates API', () => {
     ]);
 
     // BOTH must be free. This used to assert only `toContain("0")` — at least one
-    // free — which passes when one group is charged $5, i.e. it green-lit the exact
+    // free — which passes when one group is charged $6.99, i.e. it green-lit the exact
     // overcharge a customer reported on 2026-08-03.
     const prices = [
       response1.body.rates[0]?.total_price,

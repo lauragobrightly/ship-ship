@@ -190,7 +190,7 @@ const scenarios = [
   { id: 'v2-01-po-over', items: poPool({ quantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
   { id: 'v2-02-po-split-line', items: poPool({ quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // THE Aug 6 fix
   { id: 'v2-03-po-exactly-50', items: poPool({ quantity: 2, poolCents: 5000, cartCents: 5000 }), orderSubtotal: 5000, expect: 'PO_STD=$0.00' },
-  { id: 'v2-04-po-under-anchor', items: poPool({ quantity: 1, poolCents: 3000 }), orderSubtotal: 3000, expect: 'PO_STD=$5.00' },
+  { id: 'v2-04-po-under-anchor', items: poPool({ quantity: 1, poolCents: 3000 }), orderSubtotal: 3000, expect: 'PO_STD=$6.99' },
   { id: 'v2-05-po-under-anchor-elsewhere', items: poPool({ quantity: 1, poolCents: 3000, anchor: false }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' }, // sibling group holds the fee anchor
   { id: 'v2-06-cb-qty-exceeds-signed', items: poPool({ quantity: 1, callbackQuantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
   { id: 'v2-07-tampered-pool-cents', items: poPool({ quantity: 2, poolCents: 3000, tamperFirst: { _ww_ship_pool_cents: '6000' } }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
@@ -239,7 +239,7 @@ const scenarios = [
   // These are the two modes that overcharged real customers 2026-08-06..13.
   { id: 's01-discount-code-po-over', items: poPool({ quantity: 2, poolCents: 5400, cartCents: 5400 }), orderSubtotal: 6000, discountAmount: 600, expect: 'PO_STD=$0.00' },
   { id: 's02-discount-code-rts-over', items: rtsPool({ quantity: 2, poolCents: 6840, cartCents: 6840 }), orderSubtotal: 7600, discountAmount: 760, expect: 'RTS_STD=$0.00' },
-  { id: 's03-discount-code-po-under', items: poPool({ quantity: 1, poolCents: 2700, cartCents: 2700 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$5.00' },
+  { id: 's03-discount-code-po-under', items: poPool({ quantity: 1, poolCents: 2700, cartCents: 2700 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$6.99' },
   { id: 's04-stale-customer-safe', items: poPool({ quantity: 1, poolCents: 7600, cartCents: 7600 }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' },
 
   // s01-s03 sign the POST-discount total, i.e. a discount Hydrogen already saw
@@ -247,9 +247,9 @@ const scenarios = [
   // into hosted Shopify checkout AFTER Hydrogen stamped, so the signed total is
   // PRE-discount and can never equal Shopify's post-discount subtotal.
   // Orders #36872 / #36879 on 2026-08-19 are s05.
-  { id: 's05-code-typed-in-checkout-under', items: poPool({ quantity: 1, poolCents: 3000, cartCents: 3000 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$5.00' },
+  { id: 's05-code-typed-in-checkout-under', items: poPool({ quantity: 1, poolCents: 3000, cartCents: 3000 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$6.99' },
   { id: 's06-code-typed-in-checkout-over', items: rtsPool({ quantity: 2, poolCents: 7600, cartCents: 7600 }), orderSubtotal: 7600, discountAmount: 760, expect: 'RTS_STD=$0.00' },
-  { id: 's07-code-crosses-threshold-down', items: poPool({ quantity: 2, poolCents: 5600, cartCents: 5600 }), orderSubtotal: 5600, discountAmount: 1680, expect: 'PO_STD=$5.00' },
+  { id: 's07-code-crosses-threshold-down', items: poPool({ quantity: 2, poolCents: 5600, cartCents: 5600 }), orderSubtotal: 5600, discountAmount: 1680, expect: 'PO_STD=$6.99' },
 
   // Mixed RTS + preorder with a checkout-entered discount. The cart-wide
   // discount is allocated to each pool in proportion to its share, which is
@@ -261,7 +261,7 @@ const scenarios = [
       ...poPool({ quantity: 2, poolCents: 6000, cartCents: 12000 }),
     ],
     orderSubtotal: 12000, discountAmount: 2400,
-    expect: 'PO_STD=$5.00 RTS_STD=$5.00',
+    expect: 'PO_STD=$6.99 RTS_STD=$6.99',
   },
   {
     id: 'm02-mixed-60-40-10pct-only-po-crosses',
@@ -270,7 +270,7 @@ const scenarios = [
       ...poPool({ quantity: 2, poolCents: 4000, cartCents: 10000 }),
     ],
     orderSubtotal: 10000, discountAmount: 1000,
-    expect: 'PO_STD=$5.00 RTS_STD=$0.00',
+    expect: 'PO_STD=$6.99 RTS_STD=$0.00',
   },
   {
     id: 'm03-mixed-no-discount-unchanged',
