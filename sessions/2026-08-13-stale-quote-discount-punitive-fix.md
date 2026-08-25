@@ -90,10 +90,25 @@ allowed as pure shipping refunds; `notify: false`).
 - `tests/permutation-matrix.mjs` — new 33-scenario E2E harness.
 - `sessions/2026-08-13-overcharge-list.json` — refund candidates.
 
+## Refunds executed 2026-08-13 ~09:26 PT (Laura approved)
+
+Shipping-only via safe-refund.js (`notify: false`), $30.00 total. Required
+passing `parentTransactionId` — without it the wrapper forwards Shopify's
+`suggested_refund` kind and the execute step 422s.
+
+- #36377 → refund 930483339416, $5.00
+- #36477 → refund 930483372184, $5.00
+- #36489 → refund 930483404952, $5.00
+- #36498 → refund 930483437720, $10.00
+- #36605 → refund 930483470488, $5.00
+- #36459 excluded — already refunded $10.00 previously (likely CS).
+
+No customer emails sent; Laura may opt for a Fern note separately.
+
 ## Open items
 
-- Deploy the fix (Laura).
-- Refund the 6 orders ($40).
+- Deploy the fix (Laura — `cd ~/Claude/ship-ship && railway up`; a build was
+  also triggered at ~09:17 by mistake, check dashboard before re-running).
 - Decide on v3 contract (pre-discount cart total) for exact post-discount
   thresholds on discounted carts.
 - Reconcile ship-ship git: local main is ahead of origin and prod was deployed
