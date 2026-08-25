@@ -5,6 +5,10 @@ import {jest} from '@jest/globals';
 const SECRET = 'test-shared-secret';
 process.env.BATCHY_API_KEY = SECRET;
 
+// Variants Ship Ship's own Batchy lookup classifies as preorder, so a test
+// can place a line in a delivery group other than the one Hydrogen stamped.
+const PREORDER_VARIANTS = new Set(['9901', '9903', '9905']);
+
 const mockFetch = jest.fn(async (url) => {
   if (String(url).includes('/variants/')) {
     return {
@@ -14,10 +18,13 @@ const mockFetch = jest.fn(async (url) => {
     };
   }
   if (String(url).includes('/api/v1/variant-status/')) {
+    const preorder = [...PREORDER_VARIANTS].some((id) => String(url).endsWith(`/${id}`));
     return {
       ok: true,
       status: 200,
-      json: async () => ({isPreOrder: false, status: 'IN_STOCK'}),
+      json: async () => (preorder
+        ? {isPreOrder: true, status: 'PREORDER_OPEN'}
+        : {isPreOrder: false, status: 'IN_STOCK'}),
     };
   }
   throw new Error(`Unexpected network request in test: ${url}`);
@@ -41,12 +48,16 @@ const {
  */
 function signaturePayload({
   version = '1', quoteId, bucket, poolCents, cartCents, currency = 'USD',
-  productId, variantId, signedQuantity = 1, anchor,
+  productId, variantId, signedQuantity = 1, anchor, guess = false, signedGuess = guess,
 }) {
-  return [
+  const payload = [
     version, quoteId, bucket, poolCents, cartCents, currency,
     productId, variantId, signedQuantity, anchor ? '1' : '0',
-  ].join('|');
+  ];
+  // v3 signs the guess flag last. `signedGuess` lets a test sign one value
+  // and stamp another.
+  if (version === '3') payload.push(signedGuess ? '1' : '0');
+  return payload.join('|');
 }
 
 function signedProperties(options, form = 'array') {
@@ -58,10 +69,11 @@ function signedProperties(options, form = 'array') {
     _ww_ship_pool_cents: String(options.poolCents),
     _ww_ship_cart_cents: String(options.cartCents),
     _ww_ship_currency: options.currency ?? 'USD',
-    ...(options.version === '2'
+    ...(options.version === '2' || options.version === '3'
       ? {_ww_ship_qty: String(options.signedQuantity)}
       : {}),
     _ww_ship_anchor: options.anchor ? '1' : '0',
+    ...(options.version === '3' ? {_ww_ship_guess: options.guess ? '1' : '0'} : {}),
     _ww_ship_sig: crypto
       .createHmac('sha256', SECRET)
       .update(signaturePayload(options))
@@ -81,11 +93,12 @@ function item({
   productId, variantId, price, bucket = 'ready-stock', poolCents,
   cartCents, quoteId = 'quote-1', anchor = false, quantity = 1,
   signedQuantity = quantity, version = '1', propertiesForm = 'array',
+  guess = false, signedGuess = guess,
 }) {
   const signatureOptions = {
     version, quoteId, bucket, poolCents, cartCents, currency: 'USD',
     productId: String(productId), variantId: String(variantId),
-    signedQuantity, anchor,
+    signedQuantity, anchor, guess, signedGuess,
   };
   return {
     name: `Item ${variantId}`,
@@ -805,5 +818,145 @@ describe('v1 and v2 coexist during the rollout window', () => {
     );
     expect(quote).toMatchObject({poolCents: 5000, hasAnchor: true});
     expect(priceForSignedPool(quote)).toBe(0);
+  });
+});
+
+/**
+ * v3 stamps `_ww_ship_guess`. Hydrogen sets it to '1' when Batchy never
+ * answered for a line (even after one retry): the line's cents stayed out of
+ * the pool total and it was never anchored. This service reclassifies every
+ * line itself, so a guessed line that lands in the "other" group is simply
+ * priced with that group — not rejected, and not zeroed. (The 2026-08-25
+ * 22:24Z incident: one stale ready-stock stamp on a variant Batchy had moved
+ * to preorder made a $76 group ship free.)
+ */
+describe('v3 quotes let the carrier reclassify a guessed line', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const v3 = (options) => item({version: '3', signedQuantity: options.quantity ?? 1, ...options});
+
+  test('a guessed ready-stock line that Batchy says is preorder joins the preorder group and it still pays under $50', async () => {
+    // Hydrogen: $40 preorder pool (firm) + a $30 line it guessed ready-stock,
+    // cents excluded from both pools. Ship Ship's lookup puts 9901 in preorder.
+    const firm = v3({
+      productId: 9900, variantId: 9900, price: 4000, bucket: 'preorder',
+      poolCents: 4000, cartCents: 7000, anchor: true,
+    });
+    const guessed = v3({
+      productId: 9901, variantId: 9901, price: 3000, bucket: 'ready-stock',
+      poolCents: 0, cartCents: 7000, anchor: false, guess: true,
+    });
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([firm, guessed], 7000, 'Guess reclassified under'))
+      .expect(200);
+    expect(response.body.rates).toHaveLength(1);
+    expect(response.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '699'});
+  });
+
+  test('the same shape with a $60 firm pool ships free', async () => {
+    const firm = v3({
+      productId: 9902, variantId: 9902, price: 6000, bucket: 'preorder',
+      poolCents: 6000, cartCents: 9000, anchor: true,
+    });
+    const guessed = v3({
+      productId: 9903, variantId: 9903, price: 3000, bucket: 'ready-stock',
+      poolCents: 0, cartCents: 9000, anchor: false, guess: true,
+    });
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([firm, guessed], 9000, 'Guess reclassified over'))
+      .expect(200);
+    expect(response.body.rates).toHaveLength(1);
+    expect(response.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
+  });
+
+  test('a guessed line that stays in its stamped group is ignored for pool consensus', () => {
+    const firm = v3({
+      productId: 9910, variantId: 9910, price: 3000,
+      poolCents: 3000, cartCents: 5500, anchor: true,
+    });
+    const guessed = v3({
+      productId: 9911, variantId: 9911, price: 2500,
+      poolCents: 3000, cartCents: 5500, anchor: false, guess: true,
+    });
+    const quote = verifySignedShippingQuote(
+      [firm, guessed], 'ready-stock', payload([firm, guessed], 5500).rate, SECRET,
+    );
+    expect(quote).toMatchObject({poolCents: 3000, hasAnchor: true});
+    expect(priceForSignedPool(quote)).toBe(699);
+  });
+
+  test('a group made only of guessed lines fails customer-safe, not punitively', async () => {
+    const guessed = v3({
+      productId: 9905, variantId: 9905, price: 3000, bucket: 'ready-stock',
+      poolCents: 0, cartCents: 3000, anchor: false, guess: true,
+    });
+    const quote = verifySignedShippingQuote([guessed], 'preorder', payload([guessed], 3000).rate, SECRET);
+    expect(quote).toMatchObject({stale: true});
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([guessed], 3000, 'All guessed'))
+      .expect(200);
+    expect(response.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
+  });
+
+  test('an anchor on a guessed line is rejected', () => {
+    const guessed = v3({
+      productId: 9920, variantId: 9920, price: 3000,
+      poolCents: 3000, cartCents: 3000, anchor: true, guess: true,
+    });
+    expect(verifySignedShippingQuote([guessed], 'ready-stock', payload([guessed], 3000).rate, SECRET)).toBeNull();
+  });
+
+  test('a flipped guess flag is an HMAC mismatch', () => {
+    const firm = v3({
+      productId: 9930, variantId: 9930, price: 3000,
+      poolCents: 3000, cartCents: 3000, anchor: false, guess: true, signedGuess: false,
+    });
+    expect(verifySignedShippingQuote([firm], 'ready-stock', payload([firm], 3000).rate, SECRET)).toBeNull();
+    const other = v3({
+      productId: 9931, variantId: 9931, price: 3000,
+      poolCents: 3000, cartCents: 3000, anchor: false, guess: false, signedGuess: true,
+    });
+    expect(verifySignedShippingQuote([other], 'ready-stock', payload([other], 3000).rate, SECRET)).toBeNull();
+  });
+
+  test('a malformed guess flag is rejected', () => {
+    const line = v3({
+      productId: 9940, variantId: 9940, price: 3000,
+      poolCents: 3000, cartCents: 3000, anchor: true,
+    });
+    line.properties.find(({name}) => name === '_ww_ship_guess').value = 'maybe';
+    expect(verifySignedShippingQuote([line], 'ready-stock', payload([line], 3000).rate, SECRET)).toBeNull();
+  });
+
+  test('a v3 non-guessed line in the wrong group is still rejected', () => {
+    const firm = v3({
+      productId: 9950, variantId: 9950, price: 3000, bucket: 'ready-stock',
+      poolCents: 3000, cartCents: 3000, anchor: true, guess: false,
+    });
+    expect(verifySignedShippingQuote([firm], 'preorder', payload([firm], 3000).rate, SECRET)).toBeNull();
+  });
+
+  test('a firm v3 line verifies and prices exactly like v2', () => {
+    const firm = v3({
+      productId: 9960, variantId: 9960, price: 7600, quantity: 2,
+      poolCents: 7600, cartCents: 7600, anchor: true,
+    });
+    const quote = verifySignedShippingQuote([firm], 'ready-stock', payload([firm], 7600).rate, SECRET);
+    expect(quote).toMatchObject({poolCents: 7600, hasAnchor: true, hasCompleteAnchor: true});
+    expect(priceForSignedPool(quote)).toBe(0);
+  });
+
+  test('v2 quotes are unchanged: no guess flag in the payload, mismatch still rejects', () => {
+    const v2 = item({
+      version: '2', productId: 9970, variantId: 9970, price: 4000, quantity: 1,
+      signedQuantity: 1, poolCents: 4000, cartCents: 4000, anchor: true,
+    });
+    expect(v2.properties.some(({name}) => name === '_ww_ship_guess')).toBe(false);
+    const quote = verifySignedShippingQuote([v2], 'ready-stock', payload([v2], 4000).rate, SECRET);
+    expect(priceForSignedPool(quote)).toBe(699);
+    expect(verifySignedShippingQuote([v2], 'preorder', payload([v2], 4000).rate, SECRET)).toBeNull();
   });
 });

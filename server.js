@@ -374,8 +374,14 @@ function parseUnsignedInteger(value) {
  * is the cart line's own full quantity published as `_ww_ship_qty`. Both shapes
  * must stay supported — the storefront and this service deploy independently,
  * so carts signed under either version are in flight during the rollout.
+ *
+ * v3 appends `_ww_ship_guess` to the payload. '1' marks a line whose pool
+ * Hydrogen could not establish (Batchy never answered, even on retry): its
+ * cents were kept out of the signed pool total and it was never anchored, so
+ * this service lets it ship in whichever delivery group Shopify placed it
+ * instead of rejecting — and zeroing — the whole group over the disagreement.
  */
-const SUPPORTED_QUOTE_VERSIONS = ['1', '2'];
+const SUPPORTED_QUOTE_VERSIONS = ['1', '2', '3'];
 
 function quoteSignaturePayload({
   version,
@@ -388,11 +394,14 @@ function quoteSignaturePayload({
   variantId,
   quantity,
   anchor,
+  guess = false,
 }) {
-  return [
+  const payload = [
     version, quoteId, bucket, poolCents, cartCents, currency,
     productId, variantId, quantity, anchor ? '1' : '0',
-  ].join('|');
+  ];
+  if (version === '3') payload.push(guess ? '1' : '0');
+  return payload.join('|');
 }
 
 function signaturesMatch(actual, expected) {
@@ -466,6 +475,7 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
   if (!secret) return rejectSignedQuote(bucket, 'BATCHY_API_KEY is not configured');
 
   let common = null;
+  let guessedOnly = null;
   let anchorCount = 0;
   let completeAnchorCount = 0;
 
@@ -477,6 +487,8 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
     const cartCents = parseUnsignedInteger(itemProperty(item, '_ww_ship_cart_cents'));
     const currency = String(itemProperty(item, '_ww_ship_currency') ?? '').toUpperCase();
     const anchorValue = String(itemProperty(item, '_ww_ship_anchor') ?? '');
+    // v1/v2 never guessed out loud; every line was a firm claim.
+    const guessValue = version === '3' ? String(itemProperty(item, '_ww_ship_guess') ?? '') : '0';
     const signature = itemProperty(item, '_ww_ship_sig');
     const productId = String(item?.product_id ?? '');
     const variantId = String(item?.variant_id ?? '');
@@ -499,11 +511,17 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
 
     const shapeFailure =
       (!quoteId && 'missing _ww_ship_quote') ||
-      (quotedBucket !== bucket && `_ww_ship_pool "${quotedBucket}" does not match delivery group bucket "${bucket}"`) ||
+      (!['ready-stock', 'preorder'].includes(quotedBucket) && `malformed _ww_ship_pool "${quotedBucket}"`) ||
+      (!['0', '1'].includes(guessValue) && 'malformed _ww_ship_guess') ||
+      // Hydrogen's stamp is a guess when Batchy never answered for the line.
+      // Our own lookup just placed it in this group; that placement wins, the
+      // guess is discarded, and the group prices from its firm siblings.
+      (quotedBucket !== bucket && guessValue !== '1' && `_ww_ship_pool "${quotedBucket}" does not match delivery group bucket "${bucket}"`) ||
       (poolCents === null && 'malformed _ww_ship_pool_cents') ||
       (cartCents === null && 'malformed _ww_ship_cart_cents') ||
       (!currency && 'missing _ww_ship_currency') ||
       (!['0', '1'].includes(anchorValue) && 'malformed _ww_ship_anchor') ||
+      (guessValue === '1' && anchorValue === '1' && 'anchor on a guessed line') ||
       (!productId && 'missing product_id') ||
       (!variantId && 'missing variant_id') ||
       ((quantity === null || quantity < 1) && 'malformed callback quantity');
@@ -529,15 +547,26 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
     }
 
     const anchor = anchorValue === '1';
+    const guess = guessValue === '1';
+    // Verify against the bucket Hydrogen actually signed, which for a guessed
+    // line may differ from the group it landed in.
     const expectedSignature = crypto
       .createHmac('sha256', secret)
       .update(quoteSignaturePayload({
-        version, quoteId, bucket, poolCents, cartCents, currency,
-        productId, variantId, quantity: signedQuantity, anchor,
+        version, quoteId, bucket: quotedBucket, poolCents, cartCents, currency,
+        productId, variantId, quantity: signedQuantity, anchor, guess,
       }))
       .digest('hex');
     if (!signaturesMatch(signature, expectedSignature)) {
       return rejectSignedQuote(bucket, `v${version} HMAC mismatch`, item);
+    }
+
+    // A guessed line's pool cents describe the pool it was guessed into, not
+    // this group. It contributes nothing to the consensus below; the group
+    // prices from the lines whose pool Hydrogen was sure of.
+    if (guess) {
+      guessedOnly = guessedOnly ?? {quoteId, cartCents, currency, item};
+      continue;
     }
 
     const itemCommon = {quoteId, bucket, poolCents, cartCents, currency};
@@ -557,6 +586,17 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
 
   if (anchorCount > 1) {
     return rejectSignedQuote(bucket, `${anchorCount} anchor lines in one delivery group, expected at most 1`);
+  }
+  // Every line in this group was a guess, so nothing signed describes the
+  // group's pool. Not tamper evidence — the same customer-safe path as a
+  // stale quote: ship free and surface it.
+  if (!common) {
+    return staleSignedQuote(
+      bucket,
+      'every line in this group carries a guessed pool stamp (Batchy unavailable at stamping)',
+      guessedOnly?.item,
+      {quoteId: guessedOnly?.quoteId, cartCents: guessedOnly?.cartCents, currency: guessedOnly?.currency},
+    );
   }
   // Hydrogen stamps `_ww_ship_cart_cents` from `cart.cost.subtotalAmount` at
   // cart mutation and again synchronously at /checkout. A discount code the
