@@ -36,6 +36,7 @@ const {
   default: app,
   customerSafeFallbackKind,
   priceForSignedPool,
+  probeToken,
   verifySignedShippingQuote,
 } = await import('../server.js');
 
@@ -759,6 +760,121 @@ describe('v2 quotes tolerate delivery-group quantity splits', () => {
  * flight are stamped v1 and some v2 — sometimes in the same checkout, if the
  * customer added a line either side of the storefront deploy.
  */
+describe('v3 quotes tolerate delivery-group quantity splits exactly like v2', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const v3 = (options) => item({version: '3', signedQuantity: options.quantity ?? 1, ...options});
+
+  test('the 2026-08-26 defect: a complete anchor plus a split sibling under $50 still pays its fee', async () => {
+    // Hydrogen signed a $40 preorder pool: a $20 anchor (qty 1) and a $10
+    // line of qty 2. Shopify split the qty-2 line, so this group's callback
+    // carries qty 1 of it. The v3 signature was computed over the line's own
+    // quantity (2). A build that rebuilds v3 payloads from the callback
+    // quantity fails the sibling's HMAC, rejects the group, and ships free.
+    const anchor = v3({
+      bucket: 'preorder', productId: 9101, variantId: 9901, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: true, quantity: 1,
+    });
+    const splitSibling = v3({
+      bucket: 'preorder', productId: 9103, variantId: 9903, price: 1000,
+      poolCents: 4000, cartCents: 4000, anchor: false, quantity: 1, signedQuantity: 2,
+    });
+
+    const response = await request(app)
+      .post('/rates').send(payload([anchor, splitSibling], 4000, 'V3 Anchor Plus Split')).expect(200);
+    expect(response.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '699'});
+  });
+
+  test('the same shape under v2 prices identically, so the two contracts agree', async () => {
+    const anchor = item({
+      version: '2', bucket: 'preorder', productId: 9101, variantId: 9901, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: true, quantity: 1,
+    });
+    const splitSibling = item({
+      version: '2', bucket: 'preorder', productId: 9103, variantId: 9903, price: 1000,
+      poolCents: 4000, cartCents: 4000, anchor: false, quantity: 1, signedQuantity: 2,
+    });
+
+    const response = await request(app)
+      .post('/rates').send(payload([anchor, splitSibling], 4000, 'V2 Anchor Plus Split')).expect(200);
+    expect(response.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '699'});
+  });
+
+  test('a $76 v3 line of qty 2 split across two locations ships free in both groups', async () => {
+    const half = () => v3({
+      productId: 9201, variantId: 9202, price: 3800,
+      poolCents: 7600, cartCents: 7600, anchor: true,
+      quantity: 1, signedQuantity: 2,
+    });
+
+    const [first, second] = await Promise.all([
+      request(app).post('/rates').send(payload([half()], 7600, 'V3 Split A')).expect(200),
+      request(app).post('/rates').send(payload([half()], 7600, 'V3 Split B')).expect(200),
+    ]);
+    expect(first.body.rates[0].total_price).toBe('0');
+    expect(second.body.rates[0].total_price).toBe('0');
+  });
+
+  test('a v3 callback quantity above the signed quantity is still rejected', async () => {
+    const inflated = v3({
+      productId: 9301, variantId: 9302, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false, quantity: 1,
+    });
+    inflated.quantity = 3;
+
+    const response = await request(app)
+      .post('/rates').send(payload([inflated], 4000, 'V3 Inflated')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('0');
+  });
+
+  test('a v3 quote with _ww_ship_qty stripped fails customer-safe', async () => {
+    const stripped = v3({
+      productId: 9401, variantId: 9402, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false, quantity: 1, signedQuantity: 2,
+    });
+    stripped.properties = stripped.properties.filter(({name}) => name !== '_ww_ship_qty');
+
+    const response = await request(app)
+      .post('/rates').send(payload([stripped], 4000, 'V3 No Qty')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('0');
+  });
+});
+
+describe('probe traffic must identify itself exactly', () => {
+  const cart = () => [item({
+    version: '3', bucket: 'preorder', productId: 9501, variantId: 9901, price: 3000,
+    poolCents: 3000, cartCents: 3000, anchor: true, quantity: 1,
+  })];
+
+  test('the derived token is accepted and the cart prices normally', async () => {
+    const response = await request(app)
+      .post('/rates')
+      .set('X-Ship-Ship-Probe', probeToken())
+      .send(payload(cart(), 3000, 'Probe OK'))
+      .expect(200);
+    expect(response.body.rates[0].total_price).toBe('699');
+  });
+
+  test.each([
+    ['the retired magic string', 'matrix'],
+    ['a near miss', 'v3'],
+    ['an empty value', ''],
+  ])('%s is refused with a 400 instead of pricing as live traffic', async (_label, value) => {
+    const response = await request(app)
+      .post('/rates')
+      .set('X-Ship-Ship-Probe', value)
+      .send(payload(cart(), 3000, 'Probe Bad'))
+      .expect(400);
+    expect(response.body.error).toMatch(/probe token/);
+  });
+
+  test('no header at all is a live callback', async () => {
+    const response = await request(app)
+      .post('/rates').send(payload(cart(), 3000, 'Not A Probe')).expect(200);
+    expect(response.body.rates[0].total_price).toBe('699');
+  });
+});
+
 describe('v1 and v2 coexist during the rollout window', () => {
   beforeEach(() => jest.clearAllMocks());
 

@@ -27,18 +27,21 @@ const SECRET = process.env.BATCHY_API_KEY;
 if (!SECRET) { console.error('BATCHY_API_KEY is required'); process.exit(1); }
 
 const RUN = crypto.randomBytes(3).toString('hex');
+// Must match probeToken() in server.js: the service refuses any other value
+// with a 400, and suppresses fallback alerts for exactly this one.
+const PROBE_TOKEN = crypto.createHmac('sha256', SECRET).update('ship-ship-probe').digest('hex');
 
 const PO = { productId: 9325474185368, variants: { '6-12': 49649429676184, '7/8': 49670061654168, '9/10': 49670061686936 }, price: 3000 };
 const RTS = { productId: 9191420461208, variantId: 49246380949656, price: 3800 };
 
-function sign({ version = '2', quoteId, bucket, poolCents, cartCents, currency = 'USD', productId, variantId, signedQuantity, anchor }) {
-  return crypto.createHmac('sha256', SECRET)
-    .update([version, quoteId, bucket, poolCents, cartCents, currency, productId, variantId, signedQuantity, anchor ? '1' : '0'].join('|'))
-    .digest('hex');
+function sign({ version = '2', quoteId, bucket, poolCents, cartCents, currency = 'USD', productId, variantId, signedQuantity, anchor, guess = false }) {
+  const payload = [version, quoteId, bucket, poolCents, cartCents, currency, productId, variantId, signedQuantity, anchor ? '1' : '0'];
+  if (version === '3') payload.push(guess ? '1' : '0');
+  return crypto.createHmac('sha256', SECRET).update(payload.join('|')).digest('hex');
 }
 
-/** Line properties exactly as the Hydrogen v2 signer emits them. */
-function stamped({ version = '2', bucket, poolCents, cartCents, currency = 'USD', productId, variantId, signedQuantity, anchor, quoteId, tamper = {} }) {
+/** Line properties exactly as the Hydrogen signer emits them for each contract version. */
+function stamped({ version = '2', bucket, poolCents, cartCents, currency = 'USD', productId, variantId, signedQuantity, anchor, quoteId, guess = false, tamper = {} }) {
   const props = {
     _shipping_bucket: bucket,
     _ww_ship_v: version,
@@ -47,9 +50,10 @@ function stamped({ version = '2', bucket, poolCents, cartCents, currency = 'USD'
     _ww_ship_pool_cents: String(poolCents),
     _ww_ship_cart_cents: String(cartCents),
     _ww_ship_currency: currency,
-    ...(version === '2' ? { _ww_ship_qty: String(signedQuantity) } : {}),
+    ...(version === '1' ? {} : { _ww_ship_qty: String(signedQuantity) }),
     _ww_ship_anchor: anchor ? '1' : '0',
-    _ww_ship_sig: sign({ version, quoteId, bucket, poolCents, cartCents, currency, productId, variantId, signedQuantity, anchor }),
+    ...(version === '3' ? { _ww_ship_guess: guess ? '1' : '0' } : {}),
+    _ww_ship_sig: sign({ version, quoteId, bucket, poolCents, cartCents, currency, productId, variantId, signedQuantity, anchor, guess }),
   };
   return { ...props, ...tamper };
 }
@@ -100,7 +104,7 @@ async function post(body) {
   const started = Date.now();
   const res = await fetch(`${TARGET}/rates`, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json', 'X-Ship-Ship-Probe': 'matrix'},
+    headers: {'Content-Type': 'application/json', 'X-Ship-Ship-Probe': PROBE_TOKEN},
     body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => null);
@@ -117,13 +121,14 @@ const summarize = (json) =>
 const qid = () => crypto.randomBytes(12).toString('hex');
 
 /** A whole signed pool on one or more lines of one bucket. */
-function signedPool({ version = '2', bucket, lines, poolCents, cartCents, currency = 'USD', tamperFirst = {} }) {
+function signedPool({ version = '2', bucket, lines, poolCents, cartCents, currency = 'USD', tamperFirst = {}, guess = false }) {
   const quoteId = qid();
   return lines.map(([builder, opts], index) =>
     builder({
       ...opts,
       properties: stamped({
         version,
+        guess,
         bucket,
         poolCents,
         cartCents,
@@ -142,9 +147,10 @@ function signedPool({ version = '2', bucket, lines, poolCents, cartCents, curren
 const poSigned = (opts) => (o) => poItem({ variant: o.variant ?? '6-12', quantity: o.quantity, properties: o.properties });
 const rtsSigned = () => (o) => rtsItem({ quantity: o.quantity, properties: o.properties });
 
-function poPool({ version = '2', quantity, callbackQuantity, poolCents, cartCents, anchor = true, variant = '6-12', tamperFirst = {}, currency = 'USD' }) {
+function poPool({ version = '2', quantity, callbackQuantity, poolCents, cartCents, anchor = true, variant = '6-12', tamperFirst = {}, currency = 'USD', guess = false }) {
   return signedPool({
     version,
+    guess,
     bucket: 'preorder',
     poolCents,
     cartCents: cartCents ?? poolCents,
@@ -237,6 +243,44 @@ const scenarios = [
 
   // Staleness (honest carts whose stamps no longer match the checkout state).
   // These are the two modes that overcharged real customers 2026-08-06..13.
+  // v3 signed (what the storefront deployed 2026-08-25 emits: v2 + a guess flag)
+  { id: 'v3-01-po-over', items: poPool({ version: '3', quantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
+  { id: 'v3-02-po-under-anchor', items: poPool({ version: '3', quantity: 1, poolCents: 3000 }), orderSubtotal: 3000, expect: 'PO_STD=$6.99' },
+  { id: 'v3-03-po-exactly-50', items: poPool({ version: '3', quantity: 2, poolCents: 5000, cartCents: 5000 }), orderSubtotal: 5000, expect: 'PO_STD=$0.00' },
+  { id: 'v3-04-po-split-line', items: poPool({ version: '3', quantity: 2, callbackQuantity: 1, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
+  { id: 'v3-05-split-anchor-under', items: poPool({ version: '3', quantity: 2, callbackQuantity: 1, poolCents: 4000, cartCents: 4000 }).map((item) => ({ ...item, price: 2000 })), orderSubtotal: 4000, expect: 'PO_STD=$0.00' }, // a split anchor is deliberately never charged
+  {
+    // THE 2026-08-26 defect: a complete anchor plus a split sibling in an
+    // under-$50 group. A build that hashes a v3 payload from the callback
+    // quantity fails the sibling's HMAC, rejects the group, and ships free.
+    id: 'v3-06-anchor-complete-plus-split',
+    items: (() => {
+      const quoteId = qid();
+      const common = { version: '3', bucket: 'preorder', poolCents: 4000, cartCents: 4000, currency: 'USD', quoteId };
+      return [
+        poItem({ variant: '6-12', quantity: 1, properties: stamped({ ...common, productId: PO.productId, variantId: PO.variants['6-12'], signedQuantity: 1, anchor: true }) }),
+        { ...poItem({ variant: '7/8', quantity: 1, properties: stamped({ ...common, productId: PO.productId, variantId: PO.variants['7/8'], signedQuantity: 2, anchor: false }) }), price: 1000 },
+      ];
+    })(),
+    orderSubtotal: 4000,
+    expect: 'PO_STD=$6.99',
+  },
+  {
+    // Batchy never answered at stamping: the line is flagged a guess and
+    // stamped into the wrong pool. The carrier's own lookup wins and the
+    // group ships customer-safe instead of rejecting.
+    id: 'v3-07-guessed-line-wrong-pool',
+    items: signedPool({
+      version: '3', guess: true, bucket: 'ready-stock', poolCents: 0, cartCents: 3000,
+      lines: [[poSigned(), { variant: '6-12', productId: PO.productId, variantId: PO.variants['6-12'], quantity: 1, signedQuantity: 1, anchor: false }]],
+    }),
+    orderSubtotal: 3000,
+    expect: 'PO_STD=$0.00',
+  },
+  { id: 'v3-08-tampered-guess-flag', items: poPool({ version: '3', quantity: 1, poolCents: 3000, tamperFirst: { _ww_ship_guess: '1' } }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' }, // flag is signed; flipping it fails customer-safe
+  { id: 'v3-09-unsupported-v4', items: poPool({ version: '3', quantity: 1, poolCents: 3000, tamperFirst: { _ww_ship_v: '4' } }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' },
+  { id: 'v3-10-mixed-both-pools-over', items: [...rtsPool({ version: '3', quantity: 2, poolCents: 7600, cartCents: 13600 }), ...poPool({ version: '3', quantity: 2, poolCents: 6000, cartCents: 13600 })], orderSubtotal: 13600, expect: 'PO_STD=$0.00 RTS_STD=$0.00' },
+
   { id: 's01-discount-code-po-over', items: poPool({ quantity: 2, poolCents: 5400, cartCents: 5400 }), orderSubtotal: 6000, discountAmount: 600, expect: 'PO_STD=$0.00' },
   { id: 's02-discount-code-rts-over', items: rtsPool({ quantity: 2, poolCents: 6840, cartCents: 6840 }), orderSubtotal: 7600, discountAmount: 760, expect: 'RTS_STD=$0.00' },
   { id: 's03-discount-code-po-under', items: poPool({ quantity: 1, poolCents: 2700, cartCents: 2700 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$6.99' },

@@ -78,5 +78,12 @@ threshold × location combinations. The live-process permutation matrix is:
 TARGET=http://127.0.0.1:3555 BATCHY_API_KEY=... node tests/permutation-matrix.mjs
 ```
 
+The matrix sends `X-Ship-Ship-Probe` set to `probeToken()` from `server.js`
+(an HMAC of the string `ship-ship-probe` under `BATCHY_API_KEY`). That header
+is what keeps probe carts out of the Collie alert channel. Any other value is
+refused with a 400, so a hand-written probe can no longer flood alerts by
+forgetting or misspelling it (2026-08-26: 22 alerts in four minutes). Before
+pointing anything at production, send the token or expect a 400.
+
 See `sessions/2026-08-18-restore-original-fulfillment-pools.md` for the incident
 decision, coordinated rollout order, and verification evidence.

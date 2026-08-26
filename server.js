@@ -467,6 +467,20 @@ function staleSignedQuote(bucket, reason, item, quote = {}) {
  * Returns null for unstamped or rejected metadata and STALE_QUOTE for honest
  * staleness. The caller distinguishes those outcomes before setting a price.
  */
+/**
+ * The only value `x-ship-ship-probe` may carry. Probe traffic (the nightly
+ * matrix, a verification run from a laptop) prices like a real callback but
+ * must never reach the alert channel: its synthetic carts are built to hit
+ * every fallback path at once. Deriving the value from the shared secret
+ * means anyone able to sign a quote can suppress alerts on their own probes,
+ * and nobody else can — a shopper tampering with line properties cannot
+ * silence the alert their tampering raises.
+ */
+export function probeToken(secret = process.env.BATCHY_API_KEY) {
+  if (!secret) return null;
+  return crypto.createHmac('sha256', secret).update('ship-ship-probe').digest('hex');
+}
+
 export function verifySignedShippingQuote(items, bucket, rate, secret = process.env.BATCHY_API_KEY) {
   if (!Array.isArray(items) || items.length === 0) return null;
   // An entirely unstamped group is the ordinary legacy/accelerated-checkout
@@ -533,11 +547,15 @@ export function verifySignedShippingQuote(items, bucket, rate, secret = process.
     // line's own quantity instead and bounds the callback by it: a split can
     // only ever shrink a group's quantity, so `callbackQty <= signedQty` keeps
     // the signature pinned to a specific quantity of a specific variant.
-    const signedQuantity = version === '2'
-      ? parseUnsignedInteger(itemProperty(item, '_ww_ship_qty'))
-      : quantity;
+    // v3 kept that contract and only appended the guess flag, so it reads
+    // `_ww_ship_qty` too. Rebuilding a v3 payload from the callback quantity
+    // instead re-creates the v1 split failure: the HMAC cannot match, the
+    // group is rejected, and a chargeable under-$50 pool ships free.
+    const signedQuantity = version === '1'
+      ? quantity
+      : parseUnsignedInteger(itemProperty(item, '_ww_ship_qty'));
     if (signedQuantity === null || signedQuantity < 1) {
-      return rejectSignedQuote(bucket, 'missing or malformed _ww_ship_qty on a v2 quote', item);
+      return rejectSignedQuote(bucket, `missing or malformed _ww_ship_qty on a v${version} quote`, item);
     }
     if (quantity > signedQuantity) {
       return rejectSignedQuote(
@@ -989,6 +1007,21 @@ app.post('/install', async (req, res) => {
 app.post('/rates', async (req, res) => {
   try {
     const startTime = Date.now();
+
+    // A request that declares itself a probe is either exactly right or
+    // refused outright. Anything less — a misspelt value, a stale scheme —
+    // used to fall through as live traffic and flood the alert channel with
+    // synthetic carts (2026-08-26, 22 alerts in four minutes). Shopify never
+    // sends this header, so real callbacks are unaffected.
+    const probeHeader = req.get('x-ship-ship-probe');
+    const isProbe = probeHeader !== undefined;
+    if (isProbe && probeHeader !== probeToken()) {
+      return res.status(400).json({
+        error: 'x-ship-ship-probe must be the probe token derived from BATCHY_API_KEY '
+          + '(see probeToken in server.js); unrecognised probes are refused so '
+          + 'synthetic carts never reach the alert channel',
+      });
+    }
     
     // Check kill switch
     if (appConfig.killSwitch) {
@@ -1154,7 +1187,7 @@ app.post('/rates', async (req, res) => {
       hasShippingQuoteMetadata(rtsItems) && !rtsQuoteResult;
     const invalidPreorderQuote = preorderItems.length > 0 &&
       hasShippingQuoteMetadata(preorderItems) && !preorderQuoteResult;
-    const suppressFallbackAlerts = req.get('x-ship-ship-probe') === 'matrix';
+    const suppressFallbackAlerts = isProbe;
     const fallbackCartKey = destinationKey(rate);
     if (rtsQuote) fallbackAlerter.resolved({cartKey: fallbackCartKey, bucket: 'ready-stock'});
     if (preorderQuote) fallbackAlerter.resolved({cartKey: fallbackCartKey, bucket: 'preorder'});
