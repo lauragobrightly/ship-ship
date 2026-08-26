@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendAlert, startWatchdogs } from './watchdog.js';
+import { createFallbackAlerter, destinationKey } from './lib/fallback-alerts.js';
 
 dotenv.config();
 
@@ -707,43 +708,14 @@ export function customerSafeFallbackKind(quoteResult, invalidQuote, threshold = 
   return null;
 }
 
-const fallbackAlertTimes = new Map();
-const FALLBACK_ALERT_COOLDOWN_MS = 15 * 60_000;
+const fallbackAlerter = createFallbackAlerter({
+  sendAlert,
+  holdMs: Number(process.env.FALLBACK_ALERT_HOLD_MS) || 90_000,
+});
 
-function alertCustomerSafeFallback({bucket, kind, quoteResult, groupSubtotal, suppress}) {
-  if (!kind || suppress || process.env.FALLBACK_ALERTS_ENABLED === 'false') return;
-
-  const quoteKey = quoteResult?.quoteId || 'no-quote';
-  const dedupeKey = `${bucket}:${kind}:${quoteKey}`;
-  const now = Date.now();
-  const lastSent = fallbackAlertTimes.get(dedupeKey) || 0;
-  if (now - lastSent < FALLBACK_ALERT_COOLDOWN_MS) return;
-  fallbackAlertTimes.set(dedupeKey, now);
-
-  const reason = kind === 'unsigned'
-    ? 'No signed fulfillment-pool metadata reached the carrier.'
-    : kind === 'invalid'
-      ? 'Signed fulfillment-pool metadata failed verification.'
-    : kind === 'stale'
-      ? quoteResult.reason
-      : 'Shopify divided the under-$50 fee-anchor line across warehouse groups.';
-  const poolTotal = Number.isFinite(quoteResult?.poolCents)
-    ? `$${(quoteResult.poolCents / 100).toFixed(2)}`
-    : 'unknown';
-
-  void sendAlert({
-    title: `Ship Ship granted customer-safe free shipping: ${kind} ${bucket}`,
-    body: [
-      `Reason: ${reason}`,
-      `Pool: ${bucket}`,
-      `Signed pool total: ${poolTotal}`,
-      `This warehouse callback subtotal: $${(groupSubtotal / 100).toFixed(2)}`,
-      `Quote ID: ${quoteResult?.quoteId || 'missing'}`,
-      'Customer was charged $0 to prevent a duplicate warehouse fee. Investigate the checkout path.',
-    ].join('\n'),
-    severity: 'warning',
-    source: 'ship-ship-rates',
-  });
+function alertCustomerSafeFallback({bucket, kind, quoteResult, groupSubtotal, suppress, cartKey}) {
+  if (process.env.FALLBACK_ALERTS_ENABLED === 'false') return;
+  fallbackAlerter.fallback({bucket, kind, quoteResult, groupSubtotal, suppress, cartKey});
 }
 
 function hasShippingQuoteMetadata(items) {
@@ -1183,6 +1155,9 @@ app.post('/rates', async (req, res) => {
     const invalidPreorderQuote = preorderItems.length > 0 &&
       hasShippingQuoteMetadata(preorderItems) && !preorderQuoteResult;
     const suppressFallbackAlerts = req.get('x-ship-ship-probe') === 'matrix';
+    const fallbackCartKey = destinationKey(rate);
+    if (rtsQuote) fallbackAlerter.resolved({cartKey: fallbackCartKey, bucket: 'ready-stock'});
+    if (preorderQuote) fallbackAlerter.resolved({cartKey: fallbackCartKey, bucket: 'preorder'});
 
     const rates = [];
 
@@ -1202,6 +1177,7 @@ app.post('/rates', async (req, res) => {
         quoteResult: rtsQuoteResult,
         groupSubtotal: rtsSubtotal,
         suppress: suppressFallbackAlerts,
+        cartKey: fallbackCartKey,
       });
       if (!rtsQuoteResult && !invalidRtsQuote) {
         console.warn('Unsigned ready-stock callback — charging $0 because warehouse groups cannot price independently');
@@ -1231,6 +1207,7 @@ app.post('/rates', async (req, res) => {
         quoteResult: preorderQuoteResult,
         groupSubtotal: preorderSubtotal,
         suppress: suppressFallbackAlerts,
+        cartKey: fallbackCartKey,
       });
       if (!preorderQuoteResult && !invalidPreorderQuote) {
         console.warn('Unsigned preorder callback — charging $0 because warehouse groups cannot price independently');
