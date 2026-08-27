@@ -698,10 +698,19 @@ export function priceForSignedPool(quote, threshold = appConfig.threshold) {
     : 0;
 }
 
-export function customerSafeFallbackKind(quoteResult, invalidQuote, threshold = appConfig.threshold) {
+export function customerSafeFallbackKind(quoteResult, invalidQuote, threshold = appConfig.threshold, groupSubtotal = null) {
   if (invalidQuote) return 'invalid';
-  if (!quoteResult) return 'unsigned';
+  // Free shipping is decided per bucket, and this callback's group IS the
+  // bucket's stock at one warehouse. When the group alone clears $50 the
+  // bucket clears $50, so $0 was the correct price and no fee was waived.
+  // Unsigned carts (Shop app, draft orders, express buttons that skip the
+  // Hydrogen cart) and stale stamps arrive constantly at this size; alerting
+  // on them reports money that was never at stake. Stay silent. Under $50 a
+  // fee really was waived, and that still alerts.
+  const groupClearsThreshold = Number.isFinite(groupSubtotal) && groupSubtotal >= threshold;
+  if (!quoteResult) return groupClearsThreshold ? null : 'unsigned';
   if (quoteResult.stale) {
+    if (groupClearsThreshold) return null;
     // A discount applied inside hosted checkout legitimately changes the cart
     // total after Hydrogen stamps it. When the signed cart contained exactly
     // this one pool and both the signed pool and Shopify's newer post-discount
@@ -1203,7 +1212,7 @@ app.post('/rates', async (req, res) => {
           + `Group items subtotal $${rtsSubtotal / 100}.`);
       }
       const rtsPrice = invalidRtsQuote ? 0 : signedPrice ?? 0;
-      const fallbackKind = customerSafeFallbackKind(rtsQuoteResult, invalidRtsQuote);
+      const fallbackKind = customerSafeFallbackKind(rtsQuoteResult, invalidRtsQuote, appConfig.threshold, rtsSubtotal);
       alertCustomerSafeFallback({
         bucket: 'ready-stock',
         kind: fallbackKind,
@@ -1233,7 +1242,7 @@ app.post('/rates', async (req, res) => {
           + `Group items subtotal $${preorderSubtotal / 100}.`);
       }
       const poPrice = invalidPreorderQuote ? 0 : signedPrice ?? 0;
-      const fallbackKind = customerSafeFallbackKind(preorderQuoteResult, invalidPreorderQuote);
+      const fallbackKind = customerSafeFallbackKind(preorderQuoteResult, invalidPreorderQuote, appConfig.threshold, preorderSubtotal);
       alertCustomerSafeFallback({
         bucket: 'preorder',
         kind: fallbackKind,

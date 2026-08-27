@@ -386,6 +386,22 @@ describe('customer-safe fallback alerts', () => {
     expect(customerSafeFallbackKind(null, true)).toBe('invalid');
   });
 
+  test('a fallback on a group that clears $50 by itself is silent — no fee was waived', () => {
+    // 2026-08-27: Shop-app and draft-order carts at $140/$220 alerted all
+    // morning although $0 was the correct price for a $50+ bucket.
+    expect(customerSafeFallbackKind(null, false, 5000, 22000)).toBeNull();
+    expect(customerSafeFallbackKind({stale: true, reason: 'x'}, false, 5000, 7400)).toBeNull();
+    // Under $50 a fee really was waived: still alerts.
+    expect(customerSafeFallbackKind(null, false, 5000, 3800)).toBe('unsigned');
+    expect(customerSafeFallbackKind({stale: true, reason: 'x'}, false, 5000, 3800)).toBe('stale');
+    // Exactly $50 qualifies, matching the pricing rule.
+    expect(customerSafeFallbackKind(null, false, 5000, 5000)).toBeNull();
+    // Tamper-shaped rejections are never silenced by size.
+    expect(customerSafeFallbackKind(null, true, 5000, 22000)).toBe('invalid');
+    // No group subtotal supplied: previous behaviour.
+    expect(customerSafeFallbackKind(null, false)).toBe('unsigned');
+  });
+
   test('a discount typed into hosted checkout is not staleness', () => {
     // Hydrogen stamped the pre-discount total (7600). The customer then
     // entered a 10% code in hosted checkout, so Shopify reports 7600 pre and
