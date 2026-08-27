@@ -735,6 +735,56 @@ export function customerSafeFallbackKind(quoteResult, invalidQuote, threshold = 
   return null;
 }
 
+/**
+ * Whole-cart certainty.
+ *
+ * Every carrier callback carries Shopify's `order_totals.subtotal_price`: the
+ * PRE-discount subtotal of the entire cart, with any discount reported
+ * separately in `discount_amount`. (Verified live 2026-08-18: a $76 cart with a
+ * 10% code arrived as subtotal 7600 / discount 760, and the signed pre-discount
+ * total matched it — the discounted-cart fix in verifySignedShippingQuote
+ * depends on exactly that reading.)
+ *
+ * A callback whose own items sum to that figure IS the whole cart. There is no
+ * sibling warehouse group anywhere, so nothing can double a fee, and the group
+ * can be priced with certainty from numbers the customer cannot edit. That
+ * closes the gap the customer-safe fallback left open: carts that never pass
+ * through Hydrogen's /checkout bridge — the PDP Shop Pay button (a cart
+ * permalink, order #37269 on 2026-08-27), the Shop app, draft orders — arrive
+ * unsigned and were shipping free under $50 by design. Stale and rejected
+ * stamps on a whole cart price the same way.
+ *
+ * A slice of a bigger cart sums to less than the cart and never qualifies; it
+ * stays on the $0 path with its alert. The identity test compares against the
+ * pre-discount subtotal only. That is exact under the documented semantics; if
+ * Shopify ever switched to a post-discount subtotal, a buy-one-get-one cart
+ * split across two warehouses could present a slice equal to it, so this
+ * assumption is load-bearing and the 2026-08-18 evidence is what carries it.
+ *
+ * @param {object} rate - Shopify's callback body
+ * @param {number} groupCents - pre-discount extended total of every item in
+ *   this callback
+ * @returns {{orderSubtotal:number, orderDiscount:number, effectiveCents:number}|null}
+ */
+export function wholeCartCertainty(rate, groupCents) {
+  if (!Number.isSafeInteger(groupCents) || groupCents <= 0) return null;
+  const orderSubtotal = parseUnsignedInteger(rate?.order_totals?.subtotal_price);
+  if (orderSubtotal === null || orderSubtotal !== groupCents) return null;
+  const orderDiscount = parseUnsignedInteger(rate?.order_totals?.discount_amount ?? 0);
+  if (orderDiscount === null) return null;
+  return {
+    orderSubtotal,
+    orderDiscount,
+    // The whole cart is this group, so the whole discount is this group's.
+    effectiveCents: Math.max(0, groupCents - orderDiscount),
+  };
+}
+
+/** Price a whole-cart group's bucket on what the customer actually pays. */
+export function priceWholeCartBucket(certainty, threshold = appConfig.threshold) {
+  return certainty.effectiveCents >= threshold ? 0 : appConfig.feeUnderThreshold;
+}
+
 const fallbackAlerter = createFallbackAlerter({
   sendAlert,
   holdMs: Number(process.env.FALLBACK_ALERT_HOLD_MS) || 90_000,
@@ -1185,6 +1235,10 @@ app.post('/rates', async (req, res) => {
     //              anchors...): fail customer-safe at $0 and alert;
     //   unsigned — accelerated/legacy checkout: fail customer-safe at $0 because
     //              a callback cannot know how many warehouses share its pool.
+    // The last three fall through to whole-cart certainty first: when this
+    // callback's items sum to Shopify's own cart subtotal there is no other
+    // warehouse group, and the bucket is priced from that. See
+    // wholeCartCertainty().
     const rtsQuote = rtsQuoteResult && !rtsQuoteResult.stale ? rtsQuoteResult : null;
     const preorderQuote = preorderQuoteResult && !preorderQuoteResult.stale ? preorderQuoteResult : null;
     // A callback cannot distinguish a malicious quote from a broken/stale
@@ -1198,6 +1252,38 @@ app.post('/rates', async (req, res) => {
       hasShippingQuoteMetadata(preorderItems) && !preorderQuoteResult;
     const suppressFallbackAlerts = isProbe;
     const fallbackCartKey = destinationKey(rate);
+    // Only when every item in this callback belongs to one bucket. The pools
+    // live at different locations, so a two-bucket callback cannot happen
+    // physically; it would only mean Hydrogen and Batchy disagree about a
+    // variant, and that stays on the customer-safe path.
+    const singleBucket = rtsItems.length === 0 || preorderItems.length === 0;
+    const wholeCart = singleBucket ? wholeCartCertainty(rate, rtsSubtotal + preorderSubtotal) : null;
+
+    // Price one bucket of this callback. Order of authority:
+    //   1. a verified signed quote — it knows the whole pool and its anchor;
+    //   2. whole-cart certainty from Shopify's totals;
+    //   3. the customer-safe $0 fallback, which alerts.
+    const priceBucket = (bucket, quote, quoteResult, invalidQuote, subtotal) => {
+      if (!quote && wholeCart) {
+        const price = priceWholeCartBucket(wholeCart);
+        fallbackAlerter.resolved({cartKey: fallbackCartKey, bucket});
+        const stamp = invalidQuote ? 'rejected stamp' : quoteResult ? 'stale stamp' : 'no stamp';
+        console.log(`Whole-cart ${bucket} callback (items $${subtotal / 100} = Shopify subtotal, `
+          + `discount $${wholeCart.orderDiscount / 100}, ${stamp}) — priced with certainty at $${price / 100}`);
+        return {price, kind: null};
+      }
+      const signedPrice = priceForSignedPool(quote);
+      if (invalidQuote) {
+        console.warn(`Invalid ${bucket} quote — charging $0 and alerting because warehouse groups cannot price independently. `
+          + `Group items subtotal $${subtotal / 100}.`);
+      }
+      const price = invalidQuote ? 0 : signedPrice ?? 0;
+      const kind = customerSafeFallbackKind(quoteResult, invalidQuote, appConfig.threshold, subtotal);
+      if (!quoteResult && !invalidQuote) {
+        console.warn(`Unsigned ${bucket} callback — charging $0 because warehouse groups cannot price independently`);
+      }
+      return {price, kind};
+    };
     if (rtsQuote) fallbackAlerter.resolved({cartKey: fallbackCartKey, bucket: 'ready-stock'});
     if (preorderQuote) fallbackAlerter.resolved({cartKey: fallbackCartKey, bucket: 'preorder'});
 
@@ -1206,13 +1292,8 @@ app.post('/rates', async (req, res) => {
     // Emit RTS rate if there are RTS items
     // Use combinedRtsTotal for threshold check (cross-location aware)
     if (rtsSubtotal > 0) {
-      const signedPrice = priceForSignedPool(rtsQuote);
-      if (invalidRtsQuote) {
-        console.warn(`Invalid ready-stock quote — charging $0 and alerting because warehouse groups cannot price independently. `
-          + `Group items subtotal $${rtsSubtotal / 100}.`);
-      }
-      const rtsPrice = invalidRtsQuote ? 0 : signedPrice ?? 0;
-      const fallbackKind = customerSafeFallbackKind(rtsQuoteResult, invalidRtsQuote, appConfig.threshold, rtsSubtotal);
+      const {price: rtsPrice, kind: fallbackKind} =
+        priceBucket('ready-stock', rtsQuote, rtsQuoteResult, invalidRtsQuote, rtsSubtotal);
       alertCustomerSafeFallback({
         bucket: 'ready-stock',
         kind: fallbackKind,
@@ -1221,9 +1302,6 @@ app.post('/rates', async (req, res) => {
         suppress: suppressFallbackAlerts,
         cartKey: fallbackCartKey,
       });
-      if (!rtsQuoteResult && !invalidRtsQuote) {
-        console.warn('Unsigned ready-stock callback — charging $0 because warehouse groups cannot price independently');
-      }
       rates.push({
         service_name: appConfig.labels.rts,
         service_code: "RTS_STD",
@@ -1236,13 +1314,8 @@ app.post('/rates', async (req, res) => {
     // Emit Pre-Order rate if there are PO items
     // Use combinedPoTotal for threshold check (cross-location aware)
     if (preorderSubtotal > 0) {
-      const signedPrice = priceForSignedPool(preorderQuote);
-      if (invalidPreorderQuote) {
-        console.warn(`Invalid preorder quote — charging $0 and alerting because warehouse groups cannot price independently. `
-          + `Group items subtotal $${preorderSubtotal / 100}.`);
-      }
-      const poPrice = invalidPreorderQuote ? 0 : signedPrice ?? 0;
-      const fallbackKind = customerSafeFallbackKind(preorderQuoteResult, invalidPreorderQuote, appConfig.threshold, preorderSubtotal);
+      const {price: poPrice, kind: fallbackKind} =
+        priceBucket('preorder', preorderQuote, preorderQuoteResult, invalidPreorderQuote, preorderSubtotal);
       alertCustomerSafeFallback({
         bucket: 'preorder',
         kind: fallbackKind,
@@ -1251,9 +1324,6 @@ app.post('/rates', async (req, res) => {
         suppress: suppressFallbackAlerts,
         cartKey: fallbackCartKey,
       });
-      if (!preorderQuoteResult && !invalidPreorderQuote) {
-        console.warn('Unsigned preorder callback — charging $0 because warehouse groups cannot price independently');
-      }
       rates.push({
         service_name: appConfig.labels.po,
         service_code: "PO_STD",
@@ -1267,7 +1337,8 @@ app.post('/rates', async (req, res) => {
     console.log(`Rates calculated in ${processingTime}ms for ${rate.items.length} items`);
     const quoteSource = rtsQuote || preorderQuote
       ? 'signed Hydrogen fulfillment-pool quote'
-      : 'customer-safe unsigned fallback';
+      : wholeCart ? 'whole-cart certainty from Shopify order totals'
+        : 'customer-safe unsigned fallback';
     console.log(`RTS group subtotal: $${rtsSubtotal/100}, PO group subtotal: $${preorderSubtotal/100} (${quoteSource})`);
     
     res.json({ rates });

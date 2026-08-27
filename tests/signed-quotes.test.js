@@ -32,13 +32,14 @@ const mockFetch = jest.fn(async (url) => {
 
 jest.unstable_mockModule('node-fetch', () => ({default: mockFetch}));
 
+const serverExports = await import('../server.js');
 const {
   default: app,
   customerSafeFallbackKind,
   priceForSignedPool,
   probeToken,
   verifySignedShippingQuote,
-} = await import('../server.js');
+} = serverExports;
 
 /**
  * The signed payload, per contract version.
@@ -211,7 +212,6 @@ describe('signed Hydrogen pool quotes', () => {
     ['removed anchor', (quotedItem) => {
       quotedItem.properties = quotedItem.properties.filter(({name}) => name !== '_ww_ship_anchor');
     }],
-    ['quantity raised above the signed quantity', (quotedItem) => { quotedItem.quantity = 2; }],
     ['changed variant', (quotedItem) => { quotedItem.variant_id = 999; }],
   ])('%s invalidates the signature and fails customer-safe at $0', async (_name, tamper) => {
     const quotedItem = item({
@@ -224,6 +224,24 @@ describe('signed Hydrogen pool quotes', () => {
       .send(payload([quotedItem], 4000, `Tamper ${_name}`))
       .expect(200);
     expect(response.body.rates[0].total_price).toBe('0');
+  });
+
+  test('a quantity raised above the signed quantity invalidates the signature, and the whole cart is then priced from Shopify', async () => {
+    // Shopify lets the customer change quantity inside hosted checkout. The
+    // stamp no longer matches, but Shopify's subtotal (4000) equals the raised
+    // line (2 × $20): this callback is the entire cart, so there is nothing to
+    // double-charge and the fee applies. Before whole-cart certainty this
+    // shipped free.
+    const quotedItem = item({
+      productId: 601, variantId: 601, price: 2000,
+      poolCents: 4000, cartCents: 4000, anchor: false,
+    });
+    quotedItem.quantity = 2;
+    const response = await request(app)
+      .post('/rates')
+      .send(payload([quotedItem], 4000, 'Tamper quantity raised'))
+      .expect(200);
+    expect(response.body.rates[0].total_price).toBe('699');
   });
 
   test('stale cart totals fall back to unsigned pricing, not the punitive fee', async () => {
@@ -311,10 +329,12 @@ describe('signed Hydrogen pool quotes', () => {
     expect(rate.total_price).toBe('0');
   });
 
-  test('a stale quote fails customer-safe instead of pricing one warehouse', async () => {
-    // The callback cannot know whether another warehouse holds the rest of the
-    // pool. The checkout bridge refreshes honest carts; exceptional stale carts
-    // ship free rather than recreating a per-warehouse charge.
+  test('a stale quote on a whole cart is priced from Shopify, not shipped free', async () => {
+    // Signed as half of a $76 pool, but Shopify now reports a $38 cart and this
+    // callback holds all $38 of it. The stamp is out of date; the cart is not
+    // ambiguous. There is no other warehouse, so the fee applies. (A stale
+    // quote whose callback is only a slice of the cart still ships free — see
+    // 'stale cart totals fall back to unsigned pricing'.)
     const quotedItem = item({
       productId: 703, variantId: 703, price: 3800,
       poolCents: 7600, cartCents: 7600, anchor: true,
@@ -323,7 +343,7 @@ describe('signed Hydrogen pool quotes', () => {
       .post('/rates')
       .send(payload([quotedItem], 3800, 'Stale Under Threshold'))
       .expect(200);
-    expect(response.body.rates[0].total_price).toBe('0');
+    expect(response.body.rates[0].total_price).toBe('699');
   });
 
   test('441 threshold × ready/preorder location matrices preserve the exact fee invariant', () => {
@@ -1019,18 +1039,26 @@ describe('v3 quotes let the carrier reclassify a guessed line', () => {
     expect(priceForSignedPool(quote)).toBe(699);
   });
 
-  test('a group made only of guessed lines fails customer-safe, not punitively', async () => {
+  test('a group made only of guessed lines is stale; a whole cart is then priced, a slice ships free', async () => {
     const guessed = v3({
       productId: 9905, variantId: 9905, price: 3000, bucket: 'ready-stock',
       poolCents: 0, cartCents: 3000, anchor: false, guess: true,
     });
     const quote = verifySignedShippingQuote([guessed], 'preorder', payload([guessed], 3000).rate, SECRET);
     expect(quote).toMatchObject({stale: true});
-    const response = await request(app)
+    // Shopify says the cart is $30 and this callback holds all $30: whole cart.
+    const whole = await request(app)
       .post('/rates')
-      .send(payload([guessed], 3000, 'All guessed'))
+      .send(payload([guessed], 3000, 'All guessed, whole cart'))
       .expect(200);
-    expect(response.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
+    expect(whole.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '699'});
+    // Shopify says the cart is $55: another group exists somewhere. Not
+    // punitive, not per-warehouse — customer-safe $0.
+    const slice = await request(app)
+      .post('/rates')
+      .send(payload([guessed], 5500, 'All guessed, slice'))
+      .expect(200);
+    expect(slice.body.rates[0]).toMatchObject({service_code: 'PO_STD', total_price: '0'});
   });
 
   test('an anchor on a guessed line is rejected', () => {
@@ -1090,5 +1118,122 @@ describe('v3 quotes let the carrier reclassify a guessed line', () => {
     const quote = verifySignedShippingQuote([v2], 'ready-stock', payload([v2], 4000).rate, SECRET);
     expect(priceForSignedPool(quote)).toBe(699);
     expect(verifySignedShippingQuote([v2], 'preorder', payload([v2], 4000).rate, SECRET)).toBeNull();
+  });
+});
+
+describe('whole-cart certainty from Shopify order totals', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const {wholeCartCertainty, priceWholeCartBucket} = serverExports;
+
+  // A line with no stamp at all: the PDP Shop Pay button (a cart permalink),
+  // the Shop app, a draft order. Variants 9901/9903/9905 classify as preorder.
+  function unsigned({productId, variantId, price, quantity = 1}) {
+    return {
+      name: `Item ${variantId}`, quantity, price,
+      product_id: productId, variant_id: variantId,
+      requires_shipping: true, properties: null,
+    };
+  }
+  async function priced(items, cartCents, address, discountCents = 0) {
+    const response = await request(app)
+      .post('/rates')
+      .send(payload(items, cartCents, address, discountCents))
+      .expect(200);
+    return Object.fromEntries(response.body.rates.map((r) => [r.service_code, Number(r.total_price)]));
+  }
+
+  test('order #37269: an unsigned $38 PDP Shop Pay checkout pays the fee', async () => {
+    // 2026-08-27 15:05 PT. landing_site=/cart/48385345650840:1?payment=shop_pay,
+    // no line properties, one $38 romper, Shopify subtotal 3800. It shipped
+    // free. This callback is the whole cart; nothing can double the fee.
+    expect(await priced([unsigned({productId: 1101, variantId: 1101, price: 3800})], 3800, 'Whole 38'))
+      .toEqual({RTS_STD: 699});
+  });
+
+  test('an unsigned whole cart at or over $50 ships free', async () => {
+    expect(await priced([unsigned({productId: 1102, variantId: 1102, price: 3800, quantity: 2})], 7600, 'Whole 76'))
+      .toEqual({RTS_STD: 0});
+    expect(await priced([unsigned({productId: 1103, variantId: 1103, price: 5000})], 5000, 'Whole 50'))
+      .toEqual({RTS_STD: 0});
+  });
+
+  test('several unsigned lines that together are the whole cart price as one pool', async () => {
+    const two = [
+      unsigned({productId: 1104, variantId: 1104, price: 2000}),
+      unsigned({productId: 1105, variantId: 1105, price: 2000}),
+    ];
+    expect(await priced(two, 4000, 'Whole 20+20')).toEqual({RTS_STD: 699});
+    const bigger = [
+      unsigned({productId: 1106, variantId: 1106, price: 3800}),
+      unsigned({productId: 1107, variantId: 1107, price: 3800}),
+    ];
+    expect(await priced(bigger, 7600, 'Whole 38+38')).toEqual({RTS_STD: 0});
+  });
+
+  test('an unsigned $38 slice of a $76 cart stays customer-safe at $0', async () => {
+    // The other $38 may be a second ready-stock warehouse. Charging here could
+    // charge the pool twice, so this stays on the fallback path and alerts.
+    expect(await priced([unsigned({productId: 1108, variantId: 1108, price: 3800})], 7600, 'Slice 38 of 76'))
+      .toEqual({RTS_STD: 0});
+  });
+
+  test('a whole cart is priced on its post-discount value', async () => {
+    // $38 less a 10% code: $34.20, still under $50, still the fee.
+    expect(await priced([unsigned({productId: 1109, variantId: 1109, price: 3800})], 3800, 'Whole 38 -10%', 380))
+      .toEqual({RTS_STD: 699});
+    // $76 less 10%: $68.40, still free.
+    expect(await priced([unsigned({productId: 1110, variantId: 1110, price: 3800, quantity: 2})], 7600, 'Whole 76 -10%', 760))
+      .toEqual({RTS_STD: 0});
+    // $60 of preorder less 20%: $48 crosses under the threshold — the fee, as
+    // the signed path would also decide.
+    expect(await priced([unsigned({productId: 1111, variantId: 9901, price: 3000, quantity: 2})], 6000, 'Whole PO 60 -20%', 1200))
+      .toEqual({PO_STD: 699});
+  });
+
+  test('a tamper-shaped stamp on a whole cart is priced from Shopify, not from the stamp', async () => {
+    const quotedItem = item({
+      productId: 1112, variantId: 1112, price: 3800,
+      poolCents: 3800, cartCents: 3800, anchor: true,
+    });
+    quotedItem.properties.find(({name}) => name === '_ww_ship_pool_cents').value = '9900';
+    expect(await priced([quotedItem], 3800, 'Tampered whole cart')).toEqual({RTS_STD: 699});
+  });
+
+  test('a verified signed quote still outranks certainty', async () => {
+    // Coherent, valid stamp that says the fee anchor lives in another group.
+    // Hydrogen never emits this for a one-line cart, but the contract is that a
+    // verified quote is authoritative; certainty only replaces the $0 fallbacks.
+    const quotedItem = item({
+      productId: 1113, variantId: 1113, price: 3800,
+      poolCents: 3800, cartCents: 3800, anchor: false,
+    });
+    expect(await priced([quotedItem], 3800, 'Verified anchor elsewhere')).toEqual({RTS_STD: 0});
+  });
+
+  test('a callback holding both buckets is never whole-cart priced', async () => {
+    // Physically impossible (the pools are different locations); it means the
+    // storefront and Batchy disagree about a variant. Stay customer-safe.
+    const mixed = [
+      unsigned({productId: 1114, variantId: 1114, price: 3800}),
+      unsigned({productId: 1115, variantId: 9903, price: 3000}),
+    ];
+    expect(await priced(mixed, 6800, 'Mixed buckets whole cart')).toEqual({RTS_STD: 0, PO_STD: 0});
+  });
+
+  test('wholeCartCertainty is exact and refuses anything it cannot prove', () => {
+    const rate = (order_totals) => ({order_totals});
+    expect(wholeCartCertainty(rate({subtotal_price: '3800'}), 3800))
+      .toEqual({orderSubtotal: 3800, orderDiscount: 0, effectiveCents: 3800});
+    expect(wholeCartCertainty(rate({subtotal_price: '3800', discount_amount: '380'}), 3800))
+      .toEqual({orderSubtotal: 3800, orderDiscount: 380, effectiveCents: 3420});
+    expect(wholeCartCertainty(rate({subtotal_price: '7600'}), 3800)).toBeNull();      // a slice
+    expect(wholeCartCertainty(rate({subtotal_price: '3800'}), 3801)).toBeNull();      // off by a cent
+    expect(wholeCartCertainty(rate(undefined), 3800)).toBeNull();                      // no totals at all
+    expect(wholeCartCertainty(rate({subtotal_price: '38.00'}), 3800)).toBeNull();     // malformed
+    expect(wholeCartCertainty(rate({subtotal_price: '3800', discount_amount: 'x'}), 3800)).toBeNull();
+    expect(wholeCartCertainty(rate({subtotal_price: '0'}), 0)).toBeNull();
+    expect(priceWholeCartBucket({effectiveCents: 4999}, 5000)).toBe(699);
+    expect(priceWholeCartBucket({effectiveCents: 5000}, 5000)).toBe(0);
   });
 });

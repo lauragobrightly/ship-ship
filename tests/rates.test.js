@@ -91,7 +91,7 @@ describe('Shipping Rates API', () => {
     expect(response.body.rates[0]).toMatchObject({
       service_name: "Ships Now (In-Stock)",
       service_code: "RTS_STD",
-      total_price: "0",
+      total_price: "699",
       currency: "USD"
     });
   });
@@ -243,7 +243,7 @@ describe('Shipping Rates API', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  test('Unsigned single-location $30 → customer-safe free', async () => {
+  test('Unsigned $30 that is the whole cart → $6.99 (whole-cart certainty, not the $0 fallback)', async () => {
     const items = [{
       name: "Small Item",
       sku: "SMALL",
@@ -263,7 +263,7 @@ describe('Shipping Rates API', () => {
       .send(mockRateRequest(items, {}, 3000))
       .expect(200);
 
-    expect(response.body.rates[0].total_price).toBe("0");
+    expect(response.body.rates[0].total_price).toBe("699");
   });
 
   test('Gift cards only → Free shipping', async () => {
@@ -343,7 +343,7 @@ describe('Shipping Rates API', () => {
     expect(response.body.rates[0].service_code).toBe('PO_STD');
   });
 
-  test('fails customer-safe when Batchy is unavailable', async () => {
+  test('prices a whole cart even when Batchy is unavailable — the fee does not depend on the bucket', async () => {
     const response = await request(app)
       .post('/rates')
       .send(mockRateRequest([{
@@ -353,7 +353,7 @@ describe('Shipping Rates API', () => {
       .expect(200);
 
     expect(response.body.rates[0]).toMatchObject({
-      service_code: 'RTS_STD', total_price: '0',
+      service_code: 'RTS_STD', total_price: '699',
     });
   });
 

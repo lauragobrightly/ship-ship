@@ -174,18 +174,23 @@ function rtsPool({ version = '2', quantity, callbackQuantity, poolCents, cartCen
 // expect: sorted "CODE=$X.XX CODE=$X.XX" summary this build SHOULD return.
 
 const scenarios = [
-  // Unsigned carts (accelerated checkout / legacy — Batchy fallback path)
-  { id: 'u01-rts-under', items: [rtsItem()], orderSubtotal: 3800, expect: 'RTS_STD=$0.00' },
+  // Unsigned carts (accelerated checkout / legacy). When the callback's items
+  // sum to Shopify's subtotal it IS the whole cart and is priced with
+  // certainty; a slice of a bigger cart stays customer-safe at $0.
+  { id: 'u01-rts-under-whole-cart', items: [rtsItem()], orderSubtotal: 3800, expect: 'RTS_STD=$6.99' },
   { id: 'u02-rts-over', items: [rtsItem({ quantity: 2 })], orderSubtotal: 7600, expect: 'RTS_STD=$0.00' },
-  { id: 'u03-rts-just-under', items: [rtsItem()], orderSubtotal: 4999, expect: 'RTS_STD=$0.00' },
-  { id: 'u04-po-marker-under', items: [poItem()], orderSubtotal: 3000, expect: 'PO_STD=$0.00' },
+  { id: 'u03-rts-slice-of-bigger-cart', items: [rtsItem()], orderSubtotal: 7600, expect: 'RTS_STD=$0.00' }, // $38 line, $76 cart: the rest may sit at another warehouse
+  { id: 'u04-po-marker-under-whole-cart', items: [poItem()], orderSubtotal: 3000, expect: 'PO_STD=$6.99' },
   { id: 'u05-po-marker-over', items: [poItem({ quantity: 2 })], orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
-  { id: 'u06-po-fallback-new-variant-under', items: [poItem({ variant: '9/10', properties: null })], orderSubtotal: 3000, expect: 'PO_STD=$0.00' },
+  { id: 'u06-po-fallback-new-variant-under-whole-cart', items: [poItem({ variant: '9/10', properties: null })], orderSubtotal: 3000, expect: 'PO_STD=$6.99' },
   { id: 'u07-po-fallback-new-variant-over', items: [poItem({ variant: '9/10', quantity: 2, properties: null }), poItem({ variant: '7/8', properties: null })], orderSubtotal: 9000, expect: 'PO_STD=$0.00' },
   { id: 'u08-mixed-under-po-under', items: [rtsItem(), poItem()], orderSubtotal: 6800, expect: 'PO_STD=$0.00 RTS_STD=$0.00' },
   { id: 'u09-mixed-po-over', items: [rtsItem({ quantity: 2 }), poItem({ quantity: 2 })], orderSubtotal: 13600, expect: 'PO_STD=$0.00 RTS_STD=$0.00' },
   { id: 'u10-gift-card-only', items: [{ name: 'Gift Card', sku: 'GIFT-50', quantity: 1, grams: 0, price: 5000, product_id: 1, variant_id: 2, requires_shipping: false, product_type: 'Gift Card', properties: null }], orderSubtotal: 5000, expect: 'GIFT_CARD_FREE=$0.00' },
   { id: 'u11-international', items: [rtsItem()], orderSubtotal: 3800, country: 'CA', expect: 'EMPTY' },
+  { id: 'u12-whole-cart-discount-still-over', items: [rtsItem({ quantity: 2 })], orderSubtotal: 7600, discountAmount: 760, expect: 'RTS_STD=$0.00' },
+  { id: 'u13-whole-cart-discount-crosses-under', items: [poItem({ quantity: 2, properties: null })], orderSubtotal: 6000, discountAmount: 1200, expect: 'PO_STD=$6.99' },
+  { id: 'u14-whole-cart-two-lines-under', items: [poItem({ variant: '7/8', properties: null }), poItem({ variant: '9/10', properties: null })], orderSubtotal: 6000, expect: 'PO_STD=$0.00' }, // $30 + $30 = $60 whole cart, free
 
   // v1 signed (regression — old storefront contract, unchanged semantics)
   { id: 'v1-01-po-over', items: poPool({ version: '1', quantity: 2, poolCents: 6000 }), orderSubtotal: 6000, expect: 'PO_STD=$0.00' },
@@ -275,16 +280,16 @@ const scenarios = [
       lines: [[poSigned(), { variant: '6-12', productId: PO.productId, variantId: PO.variants['6-12'], quantity: 1, signedQuantity: 1, anchor: false }]],
     }),
     orderSubtotal: 3000,
-    expect: 'PO_STD=$0.00',
+    expect: 'PO_STD=$6.99',
   },
-  { id: 'v3-08-tampered-guess-flag', items: poPool({ version: '3', quantity: 1, poolCents: 3000, tamperFirst: { _ww_ship_guess: '1' } }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' }, // flag is signed; flipping it fails customer-safe
-  { id: 'v3-09-unsupported-v4', items: poPool({ version: '3', quantity: 1, poolCents: 3000, tamperFirst: { _ww_ship_v: '4' } }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' },
+  { id: 'v3-08-tampered-guess-flag', items: poPool({ version: '3', quantity: 1, poolCents: 3000, tamperFirst: { _ww_ship_guess: '1' } }), orderSubtotal: 3000, expect: 'PO_STD=$6.99' }, // flag is signed; flipping it rejects the stamp, and the whole cart is priced from Shopify
+  { id: 'v3-09-unsupported-v4', items: poPool({ version: '3', quantity: 1, poolCents: 3000, tamperFirst: { _ww_ship_v: '4' } }), orderSubtotal: 3000, expect: 'PO_STD=$6.99' },
   { id: 'v3-10-mixed-both-pools-over', items: [...rtsPool({ version: '3', quantity: 2, poolCents: 7600, cartCents: 13600 }), ...poPool({ version: '3', quantity: 2, poolCents: 6000, cartCents: 13600 })], orderSubtotal: 13600, expect: 'PO_STD=$0.00 RTS_STD=$0.00' },
 
   { id: 's01-discount-code-po-over', items: poPool({ quantity: 2, poolCents: 5400, cartCents: 5400 }), orderSubtotal: 6000, discountAmount: 600, expect: 'PO_STD=$0.00' },
   { id: 's02-discount-code-rts-over', items: rtsPool({ quantity: 2, poolCents: 6840, cartCents: 6840 }), orderSubtotal: 7600, discountAmount: 760, expect: 'RTS_STD=$0.00' },
   { id: 's03-discount-code-po-under', items: poPool({ quantity: 1, poolCents: 2700, cartCents: 2700 }), orderSubtotal: 3000, discountAmount: 300, expect: 'PO_STD=$6.99' },
-  { id: 's04-stale-customer-safe', items: poPool({ quantity: 1, poolCents: 7600, cartCents: 7600 }), orderSubtotal: 3000, expect: 'PO_STD=$0.00' },
+  { id: 's04-stale-customer-safe', items: poPool({ quantity: 1, poolCents: 7600, cartCents: 7600 }), orderSubtotal: 3000, expect: 'PO_STD=$6.99' },
 
   // s01-s03 sign the POST-discount total, i.e. a discount Hydrogen already saw
   // in the cart. The real leak was the other path: the customer types the code

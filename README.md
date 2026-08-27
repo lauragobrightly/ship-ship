@@ -31,12 +31,17 @@ Shopify can call `/rates` once per fulfillment group. A callback cannot see its
 sibling groups, so it cannot reconstruct either stock pool reliably. The signed
 quote supplies that missing cart-wide context without waiting for sibling
 callbacks. Hydrogen's `/checkout` bridge refreshes every quote synchronously.
-Accelerated or legacy carts that bypass the bridge receive the customer-safe $0
-fallback; that is deliberate undercharging, never per-warehouse overcharging.
-This fallback is an incident guard, not exact business-rule coverage. Shop and
-the direct PDP Shop Pay button bypass the bridge, and an under-$50 RTS cart can
-still be split into several physical delivery groups. This branch must not be
-deployed as the final fix until a Shopify-checkout-wide layer can collapse
+Carts that bypass the bridge — the PDP Shop Pay button, the Shop app, draft
+orders — arrive unsigned. Every callback also carries Shopify's own
+`order_totals.subtotal_price` for the whole cart, so when a callback's items sum
+to exactly that figure it *is* the whole cart: there is no sibling warehouse
+group, nothing can double a fee, and the bucket is priced with certainty from
+numbers the customer cannot edit (`wholeCartCertainty` in `server.js`). Stale
+and rejected stamps on a whole cart price the same way. Only a callback that is
+a slice of a bigger cart still takes the customer-safe $0 fallback and alerts;
+that is deliberate undercharging, never per-warehouse overcharging. An
+under-$50 unsigned cart split across several physical delivery groups is the
+one remaining gap, and it needs a Shopify-checkout-wide layer to collapse
 those groups to one fee.
 
 ## Production
