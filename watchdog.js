@@ -3,11 +3,13 @@
 // Two standing checks, alerting through Collie's /alerts/paolo → Slack:
 //   1. Nightly (2:30am PT): run the permutation matrix against THIS live
 //      process. Silent when every scenario passes; alerts on any mismatch.
-//   2. Weekly (Monday 7:00am PT): scan the last 7 days of Shopify orders for
-//      shipping charges the policy can't explain. ALWAYS posts one line —
-//      findings or "clean" — so a dead watchdog is visible within a week.
+//   2. Daily (7:00am PT): audit completed orders through Hydra for both
+//      undercharges and overcharges; report unknown classifications explicitly.
 import { execFile } from 'child_process';
 import fetch from 'node-fetch';
+import {summarizeShippingAudit} from './lib/order-shipping-audit.js';
+import {readAuditOrders} from './lib/order-audit-source.js';
+import {readShippingPoolCoverage} from './lib/shipping-pool-coverage.js';
 
 const ALERT_URL = process.env.COLLIE_ALERT_URL || 'https://collie-production.up.railway.app/alerts/paolo';
 const ALERT_TOKEN = process.env.COLLIE_ALERT_TOKEN || '';
@@ -16,7 +18,7 @@ const ALERT_CHANNEL = process.env.COLLIE_ALERT_CHANNEL || '';
 export async function sendAlert({ title, body, severity = 'info', source = 'ship-ship-watchdog' }) {
   if (!ALERT_TOKEN) {
     console.warn('[watchdog] COLLIE_ALERT_TOKEN not set; alert not sent:', title);
-    return;
+    return false;
   }
   try {
     const res = await fetch(ALERT_URL, {
@@ -30,9 +32,11 @@ export async function sendAlert({ title, body, severity = 'info', source = 'ship
         ...(ALERT_CHANNEL ? {channel: ALERT_CHANNEL} : {}),
       }),
     });
-    if (!res.ok) console.error('[watchdog] alert POST failed:', res.status, await res.text());
+    if (!res.ok) console.error('[watchdog] alert POST failed:', res.status);
+    return res.ok;
   } catch (err) {
     console.error('[watchdog] alert POST threw:', err.message);
+    return false;
   }
 }
 
@@ -97,115 +101,53 @@ export function runMatrixSelfTest(port) {
   });
 }
 
-// ── Weekly overcharge sweep ─────────────────────────────────────────────────
-
-function poolForShippingLine(line) {
-  const code = String(line?.code || '').toUpperCase();
-  const title = String(line?.title || '');
-  if (code === 'RTS_STD' || /ships now|in-stock/i.test(title)) return 'ready-stock';
-  if (code === 'PO_STD' || /pre-?order|ships later/i.test(title)) return 'preorder';
-  return null;
+// A full Pacific calendar day avoids gaps when daylight saving time changes.
+export function previousPacificDayWindow(now) {
+  const date = new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit'}).format(now);
+  const today = Date.parse(`${date}T00:00:00Z`);
+  const wall = new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'});
+  const midnight = target => {
+    let candidate = target;
+    for (let i = 0; i < 3; i++) {
+      const p = Object.fromEntries(wall.formatToParts(new Date(candidate)).map(x => [x.type, x.value]));
+      const represented = Date.parse(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}Z`);
+      candidate += target - represented;
+    }
+    return new Date(candidate).toISOString();
+  };
+  return {since: midnight(today - 86400000), until: midnight(today)};
 }
 
-function itemProperty(item, key) {
-  const properties = item?.properties;
-  if (Array.isArray(properties)) {
-    return properties.find((property) =>
-      (property?.name ?? property?.key) === key)?.value ?? null;
-  }
-  return properties?.[key] ?? null;
-}
-
-function lineItemCents(item) {
-  if (item?.discounted_total !== undefined) {
-    return Math.round(Number(item.discounted_total || 0) * 100);
-  }
-  const gross = Math.round(Number(item?.price || 0) * 100) * Number(item?.quantity || 0);
-  const discount = Math.round(Number(item?.total_discount || 0) * 100);
-  return Math.max(0, gross - discount);
-}
-
-// Pure classifier so it can be unit-tested. Physical Shopify delivery groups
-// are not economic pools. Ready-stock may contribute at most one $6.99 charge and
-// preorder may contribute at most one; either pool is free at $50.
-export function classifyOrderShipping(order, { thresholdCents, feeCents }) {
-  // Policy governs US shipments only; international rates legitimately exceed
-  // the domestic fee (Economy International tiers, live carrier rates).
-  const country = order.shipping_address?.country_code || 'US';
-  if (country !== 'US') return null;
-  const lines = (order.shipping_lines || []).filter(l =>
-    !/mystery/i.test(l.title || '') && (l.code || '') !== 'MYSTERY_BOX_FLAT');
-  if (!lines.length) return null;
-  const centsOf = (v) => Math.round(Number(v || 0) * 100);
-  const overFee = lines.filter(l => centsOf(l.price) > feeCents);
-  if (overFee.length) {
-    return `shipping line over the fee: ${overFee.map(l => `${l.title} $${l.price}`).join(', ')}`;
-  }
-  const poolLines = lines
-    .map(line => ({ line, pool: poolForShippingLine(line), cents: centsOf(line.price) }))
-    .filter(entry => entry.pool);
-  for (const pool of ['ready-stock', 'preorder']) {
-    const paidCents = poolLines
-      .filter(entry => entry.pool === pool)
-      .reduce((sum, entry) => sum + entry.cents, 0);
-    if (paidCents > feeCents) {
-      return `${pool} charged $${(paidCents / 100).toFixed(2)} across warehouse groups; maximum is $${(feeCents / 100).toFixed(2)}`;
-    }
-  }
-
-  if (Array.isArray(order.line_items) && order.line_items.length) {
-    const poolTotals = {'ready-stock': 0, preorder: 0};
-    for (const item of order.line_items) {
-      if (item?.requires_shipping === false) continue;
-      const marker = itemProperty(item, '_shipping_bucket');
-      const pool = marker === 'preorder' ? 'preorder' : 'ready-stock';
-      poolTotals[pool] += lineItemCents(item);
-    }
-    for (const pool of ['ready-stock', 'preorder']) {
-      const paidCents = poolLines
-        .filter(entry => entry.pool === pool)
-        .reduce((sum, entry) => sum + entry.cents, 0);
-      if (paidCents > 0 && poolTotals[pool] >= thresholdCents) {
-        return `${pool} pool at $${(poolTotals[pool] / 100).toFixed(2)} charged $${(paidCents / 100).toFixed(2)} shipping`;
-      }
-    }
-  }
-  return null;
-}
-
-export async function runOverchargeSweep({ thresholdCents, feeCents }) {
-  const since = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
-  const domain = process.env.SHOPIFY_SHOP_DOMAIN;
-  // The app's own token is scoped to products/variants; order reads need the
-  // ops admin token (SWEEP_SHOPIFY_TOKEN on Railway).
-  const token = process.env.SWEEP_SHOPIFY_TOKEN || process.env.SHOPIFY_ACCESS_TOKEN;
-  let url = `https://${domain}/admin/api/2024-07/orders.json?status=any&created_at_min=${since}&limit=250`
-    + `&fields=name,created_at,email,subtotal_price,shipping_lines,shipping_address,line_items`;
-  const flagged = [];
-  let scanned = 0;
-  for (let page = 0; page < 8 && url; page++) {
-    const res = await fetch(url, { headers: { 'X-Shopify-Access-Token': token } });
-    if (!res.ok) throw new Error(`orders fetch ${res.status}`);
-    const orders = (await res.json()).orders || [];
-    scanned += orders.length;
-    for (const order of orders) {
-      const reason = classifyOrderShipping(order, { thresholdCents, feeCents });
-      if (reason) flagged.push(`${order.name} (${order.email}): ${reason}`);
-    }
-    const link = res.headers.get('link') || '';
-    const next = link.split(',').find(part => part.includes('rel="next"'));
-    url = next ? next.match(/<([^>]+)>/)?.[1] : null;
-  }
-  const title = flagged.length
-    ? `Ship Ship weekly sweep: ${flagged.length} suspicious shipping charge(s) in ${scanned} orders`
-    : `Ship Ship weekly sweep clean: ${scanned} orders, no unexplained shipping charges`;
-  await sendAlert({
-    title,
-    body: flagged.slice(0, 15).join('\n'),
-    severity: flagged.length ? 'warning' : 'low',
-  });
-  console.log(`[watchdog] weekly sweep: ${scanned} scanned, ${flagged.length} flagged`);
-  return { scanned, flagged };
+// One daily completed-order summary; quote warnings remain separate diagnostics.
+export async function runShippingAudit({thresholdCents, feeCents,
+  readOrders = readAuditOrders, readCoverage = readShippingPoolCoverage, report = sendAlert, now = new Date()} = {}) {
+  const {since, until} = previousPacificDayWindow(now);
+  const orders = await readOrders({since, until});
+  const audit = summarizeShippingAudit(orders, {thresholdCents, feeCents});
+  try { audit.coverage = await readCoverage(); }
+  catch (error) { audit.coverage = {error: error.message}; }
+  const amount = c => `$${(c / 100).toFixed(2)}`;
+  const title = `Ship Ship order audit: ${audit.scanned} orders, `
+    + `${amount(audit.underchargeCents)} undercharged, ${amount(audit.overchargeCents)} overcharged, `
+    + `${audit.unknown.length} need classification review`;
+  const body = [
+    `Completed orders created ${since} to ${until}.`,
+    `${audit.matched} matched the recorded pool policy; ${audit.excluded} excluded.`,
+    ...audit.variances.slice(0, 15).map(r => `${r.orderName}: ` + r.pools.map(p =>
+      `${p.pool} subtotal ${amount(p.subtotalCents)}, expected ${amount(p.expectedCents)}, paid ${amount(p.paidCents)}`).join('; ')),
+    ...audit.unknown.slice(0, 10).map(r => `${r.orderName}: unverified (${r.reason})`),
+    audit.coverage.error ? `Catalog classification check failed: ${audit.coverage.error}`
+      : `Catalog: ${audit.coverage.scanned} active variants checked; ${audit.coverage.drift.length} pool mismatches.`,
+    ...(audit.coverage.drift || []).slice(0, 10).map(v => `${v.sku || v.variantId}: expected ${v.expected}, recorded ${v.actual || 'missing'}`),
+    'Based on purchase-time order attributes. Checkout quote warnings are not completed-order losses.',
+  ].join('\n');
+  const accepted = await report({title, body, severity: audit.variances.length || audit.unknown.length ||
+    audit.coverage.error || audit.coverage.drift?.length ? 'warning' : 'low'});
+  if (accepted === false) throw new Error('Completed-order report was not accepted by the alert endpoint');
+  console.log(`[watchdog] completed-order audit: ${audit.scanned} scanned, ${audit.variances.length} variances, ${audit.unknown.length} unknown`);
+  return audit;
 }
 
 // ── Boot ────────────────────────────────────────────────────────────────────
@@ -216,6 +158,6 @@ export function startWatchdogs({ port, thresholdCents, feeCents }) {
     return;
   }
   scheduleDaily(2, 30, () => runMatrixSelfTest(port), 'nightly matrix self-test');
-  scheduleDaily(7, 0, () => runOverchargeSweep({ thresholdCents, feeCents }), 'weekly overcharge sweep', 1);
-  console.log('[watchdog] armed: nightly matrix 2:30am PT, weekly sweep Mon 7:00am PT');
+  scheduleDaily(7, 0, () => runShippingAudit({ thresholdCents, feeCents }), 'daily completed-order audit');
+  console.log('[watchdog] armed: nightly matrix 2:30am PT, daily order audit 7:00am PT');
 }

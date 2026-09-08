@@ -2,6 +2,34 @@
 
 Wildwoven's Shopify carrier service for ready-to-ship and preorder rates.
 
+## Latest verification — September 8, 2026
+
+The authorized implementation and deployment record is in
+[the September 8 implementation note](sessions/2026-09-08-monitoring-and-function-preparation.md).
+The new daily 7 a.m. Pacific audit checks completed orders from the previous
+Pacific calendar day for both undercharges and overcharges, and compares all
+active variant pool fields against Batchy. Shopify reads use `HYDRA_URL` and
+`HYDRA_API_KEY`. Missing metadata is reported as unknown. The optional checkout
+Function mode remains disabled pending app approval and final hosted acceptance.
+All 1,772 active variant pool fields were backfilled through Hydra and verified.
+
+Initial investigation (before the implementation):
+
+Production remains commit `5fbd66d`, Railway deployment `084b1e2b`.
+Today's ten completed orders show no accidental free shipping: three ordinary
+under-$50 orders paid $6.99, six ready-stock pools qualified, and one manually
+discounted lost-package replacement had no shipping line. Four Slack warnings
+describe three checkout episodes, not four completed orders. The latest 250
+orders had no positive under-$50 subtotal with $0 shipping; the stamped-pool
+comparison also found no mismatches, subject to classification limitations.
+
+A local, undeployed wording correction calls fallback events "$0 shipping
+quotes" and explicitly leaves checkout completion unverified. Its eight alert
+tests pass. The current weekly watchdog detects overcharges only; it does not
+measure lost shipping revenue. The public-app Function is not active on
+Wildwoven. See [the audit and completion plan](sessions/2026-09-08-shipping-alerts-and-completion-plan.md)
+for evidence, history, limitations, and the recommended next work.
+
 ## Shipping rules
 
 - Hydrogen signs the post-discount ready-stock and preorder pool totals before

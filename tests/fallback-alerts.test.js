@@ -36,8 +36,8 @@ describe('fallback alert debounce', () => {
     advance(1);
     expect(sendAlert).toHaveBeenCalledTimes(1);
     const msg = sendAlert.mock.calls[0][0];
-    expect(msg.title).toBe('Ship Ship granted customer-safe free shipping: stale ready-stock');
-    expect(msg.body).toContain('No corrected quote arrived for this destination within 1s');
+    expect(msg.title).toBe('Ship Ship returned a $0 shipping quote: stale ready-stock');
+    expect(msg.body).toContain('No corrected quote was matched to this destination within 1s');
     expect(msg.body).toContain('Signed pool total: $68.00');
     expect(msg.body).toContain('This warehouse callback subtotal: $38.00');
   });
@@ -63,7 +63,7 @@ describe('fallback alert debounce', () => {
     const {alerter, sendAlert} = harness();
     expect(alerter.fallback(stale({kind: 'invalid'}))).toBe('sent');
     expect(sendAlert).toHaveBeenCalledTimes(1);
-    expect(sendAlert.mock.calls[0][0].body).toContain('not a race');
+    expect(sendAlert.mock.calls[0][0].body).toContain('Checkout completion and the final shipping charge are unverified');
   });
 
   test('cooldown still applies after a held alert is sent', () => {

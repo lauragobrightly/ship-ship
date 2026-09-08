@@ -9,6 +9,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendAlert, startWatchdogs } from './watchdog.js';
 import { createFallbackAlerter, destinationKey } from './lib/fallback-alerts.js';
+import { checkoutFunctionActive, functionCarrierRates } from './lib/function-carrier-rates.js';
 
 dotenv.config();
 
@@ -990,6 +991,8 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     cache: 'in-memory',
+    shipping_mode: checkoutFunctionActive() ? 'checkout-function' : 'signed-quote-bridge',
+    order_audit_hydra: Boolean(process.env.HYDRA_URL && process.env.HYDRA_API_KEY),
     batchy_api: process.env.BATCHY_API_KEY ? 'configured' : 'missing',
     batchy_url: process.env.BATCHY_URL || 'https://batchy-production-0e03.up.railway.app'
   });
@@ -1199,7 +1202,9 @@ app.post('/rates', async (req, res) => {
     
     // Prefer Hydrogen's affirmative preorder marker, then fall back to Batchy
     // for accelerated checkouts and legacy carts.
-    const variantStatuses = await classifyPreOrderItems(rate.items);
+    const variantStatuses = checkoutFunctionActive()
+      ? await getVariantPreOrderStatus([...new Set(rate.items.map(item => String(item.variant_id)))])
+      : await classifyPreOrderItems(rate.items);
 
     // Calculate subtotals for THIS delivery group
     let rtsSubtotal = 0;
@@ -1219,6 +1224,13 @@ app.post('/rates', async (req, res) => {
         rtsSubtotal += extended;
         rtsItems.push(item);
       }
+    }
+
+    if (checkoutFunctionActive()) {
+      const rates = functionCarrierRates({hasReadyStock: rtsItems.length > 0,
+        hasPreorder: preorderItems.length > 0, feeCents: appConfig.feeUnderThreshold, currency: appConfig.currency});
+      console.log(`Checkout Function base rate: ${rates[0]?.service_code || 'empty'}; fee ${rates[0]?.total_price || '0'} cents`);
+      return res.json({rates});
     }
 
     const rtsQuoteResult = rtsItems.length > 0
